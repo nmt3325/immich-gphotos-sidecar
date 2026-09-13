@@ -1,0 +1,38 @@
+# Copy to docker-compose.yml, copy .env.example to .env, then:
+#   docker compose build
+#   docker compose run --rm immich-gphotos-sidecar doctor
+#   docker compose up -d
+services:
+  immich-gphotos-sidecar:
+    build:
+      context: .
+      args:
+        # pin gotohp if you want reproducible images, e.g. GOTOHP_REF: v0.4.0
+        GOTOHP_REF: main
+    image: immich-gphotos-sidecar:latest
+    container_name: immich-gphotos-sidecar
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      TZ: Asia/Tokyo
+    volumes:
+      - ./data/state:/state       # sqlite sync state (must persist)
+      - ./data/sidecar:/sidecar   # sidecar JSON/XMP + album/library snapshots
+      - ./data/config:/config     # gotohp credentials (must persist)
+      - sidecar-work:/work        # scratch: downloads + staging (can be tmpfs)
+    # Run as your own user if you want the sidecar files owned by you:
+    # user: "1000:1000"
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.main", "stats"]
+      interval: 10m
+      timeout: 60s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  sidecar-work:
