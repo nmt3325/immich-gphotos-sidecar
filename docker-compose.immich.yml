@@ -1,0 +1,47 @@
+# Immich のスタックへ相乗りさせるための追加定義。
+# Immich の docker-compose.yml / .env と同じフォルダに置いて使う。
+#
+#   cp .env.example sidecar.env   # ← Immich の .env とは別名にするのが肝
+#   $EDITOR sidecar.env           # IMMICH_API_KEY / GOTOHP_AUTH_STRING など
+#   docker compose -f docker-compose.yml -f docker-compose.immich.yml pull
+#   docker compose -f docker-compose.yml -f docker-compose.immich.yml run --rm immich-gphotos-sidecar doctor
+#   docker compose -f docker-compose.yml -f docker-compose.immich.yml up -d
+#
+# 毎回 -f を並べたくない場合は Immich の .env に
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.immich.yml
+# を足すか、Immich の docker-compose.yml の先頭で include: する（Compose v2.20+）。
+services:
+  immich-gphotos-sidecar:
+    image: ghcr.io/nmt3325/immich-gphotos-sidecar:latest
+    container_name: immich-gphotos-sidecar
+    restart: unless-stopped
+    depends_on:
+      - immich-server
+    # env_file は「コンテナへ渡す環境変数」。compose ファイル内の ${...} 補間には
+    # 使われないので、Immich の .env とキーが混ざることはない。
+    env_file:
+      - ./sidecar.env
+    environment:
+      # 同じ compose プロジェクト内なのでサービス名で Immich に届く（sidecar.env より優先）
+      IMMICH_BASE_URL: http://immich-server:2283
+      # ${TZ} は Immich の .env（＝補間用ファイル）から読まれる
+      TZ: ${TZ:-Asia/Tokyo}
+    volumes:
+      - ./sidecar/state:/state     # sqlite sync state (must persist)
+      - ./sidecar/sidecar:/sidecar # sidecar JSON/XMP + reports (must persist)
+      - ./sidecar/config:/config   # gotohp credentials (must persist)
+      - sidecar-work:/work         # scratch: downloads + staging
+    # user: "1000:1000"
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.main", "stats"]
+      interval: 10m
+      timeout: 60s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  sidecar-work:

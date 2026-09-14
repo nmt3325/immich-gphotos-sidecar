@@ -35,7 +35,7 @@ cp docker-compose.example.yml docker-compose.yml
 cp .env.example .env
 $EDITOR .env            # IMMICH_BASE_URL / IMMICH_API_KEY / GOTOHP_AUTH_STRING
 
-docker compose build                      # gotohp を CLI タグでビルド（数分）
+docker compose pull                       # ghcr.io からイメージ取得（自前ビルドなら docker compose build）
 docker compose run --rm immich-gphotos-sidecar doctor   # 事前チェック
 docker compose run --rm immich-gphotos-sidecar --max-assets 5 run   # 小さく試す
 docker compose up -d                      # 常駐（既定 1 日 1 回）
@@ -71,6 +71,49 @@ Auth String は gotohp の README にある手順（Android の Google フォト
 > 別アプリの作成物として扱われ、説明文の書き換えやアルバム追加ができません。
 > そのため既定値は `ALBUM_BACKEND=gotohp` / `METADATA_BACKEND=embed` です。
 > Library API バックエンドは「Library API 経由でアップロードした資産を扱う」等の特殊用途向けです。
+
+## イメージ（GHCR）と自動ビルド
+
+`main` への push / `v*` タグ / 手動実行（workflow_dispatch）で GitHub Actions が
+E2E テスト → `linux/amd64` + `linux/arm64` のビルド → GHCR への push を自動実行します。
+
+```bash
+docker pull ghcr.io/nmt3325/immich-gphotos-sidecar:latest
+```
+
+| タグ | 内容 |
+| --- | --- |
+| `latest` | `main` の最新ビルド |
+| `main` | ブランチ名タグ（`latest` と同じ内容） |
+| `sha-<短縮SHA>` | コミット単位で固定したいとき |
+| `v1.2.3` / `1.2` | `v*` タグを push したとき |
+
+リポジトリが private の間は GHCR のパッケージも private なので、pull 側で
+`read:packages` 権限の PAT を使った `docker login ghcr.io` が必要です
+（Package settings で public にすれば不要）。
+
+## Immich の docker compose に同居させる
+
+Immich の `docker-compose.yml` と同じフォルダに置く場合、**Immich の `.env` は触らず**、
+サイドカー用の環境変数は `sidecar.env` という別名ファイルにして `env_file:` で読み込みます。
+
+```bash
+cd /path/to/immich            # immich の docker-compose.yml と .env がある場所
+cp <this-repo>/docker-compose.immich.yml .
+cp <this-repo>/.env.example sidecar.env
+$EDITOR sidecar.env           # IMMICH_API_KEY / GOTOHP_AUTH_STRING など
+docker compose -f docker-compose.yml -f docker-compose.immich.yml up -d
+```
+
+- `.env` は「compose ファイル内の `${...}` を埋める補間用」で、プロジェクトディレクトリに
+  1 つだけ自動で読まれます。`env_file:` は「コンテナへ渡す環境変数」で任意のファイル名を
+  指定でき、補間には使われません。だから `sidecar.env` は Immich の `.env` と衝突しません。
+- Immich の `.env` への追記は非推奨です。`immich-server` は `env_file: .env` を読むので、
+  `GOTOHP_AUTH_STRING` などの秘密が Immich のコンテナにも渡ってしまいます。
+- Immich の `.env` の値を使いたいときだけ `environment:` 側で `${TZ:-Asia/Tokyo}` のように参照します。
+
+`include:` / `COMPOSE_FILE` / 別プロジェクト + external network などの選択肢は
+[docs/immich-compose.md](docs/immich-compose.md) にまとめています。
 
 ## コマンド
 

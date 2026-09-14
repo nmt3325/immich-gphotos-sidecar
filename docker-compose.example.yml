@@ -1,15 +1,22 @@
-# Copy to docker-compose.yml, copy .env.example to .env, then:
-#   docker compose build
+# 単体で動かす場合の例。Immich の docker compose に相乗りさせるなら
+# docker-compose.immich.yml と docs/immich-compose.md を参照。
+#
+#   cp docker-compose.example.yml docker-compose.yml
+#   cp .env.example .env
+#   docker compose pull
 #   docker compose run --rm immich-gphotos-sidecar doctor
 #   docker compose up -d
 services:
   immich-gphotos-sidecar:
-    build:
-      context: .
-      args:
-        # pin gotohp if you want reproducible images, e.g. GOTOHP_REF: v0.4.0
-        GOTOHP_REF: main
-    image: immich-gphotos-sidecar:latest
+    # GitHub Actions が main / v* タグごとに自動ビルドして GHCR へ push している。
+    # 本番は :sha-xxxxxxx や :v1.0.0 で固定するのが安全。
+    image: ghcr.io/nmt3325/immich-gphotos-sidecar:latest
+    # 自前でビルドしたい場合は上の image を消して build を有効化する
+    # build:
+    #   context: .
+    #   args:
+    #     # pin gotohp if you want reproducible images, e.g. GOTOHP_REF: v0.10.0
+    #     GOTOHP_REF: main
     container_name: immich-gphotos-sidecar
     restart: unless-stopped
     env_file:
