@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List
 
+from .google_auth import read_auth_data_file
+
 _TRUE = {"1", "true", "yes", "y", "on"}
 
 ALBUM_BACKENDS = ("gpmc", "library_api", "none")
@@ -46,6 +48,12 @@ def env_list(name: str, default: List[str]) -> List[str]:
     return [item.strip() for item in value.replace(";", ",").split(",") if item.strip()]
 
 
+def auth_data_file_path() -> Path:
+    """Where `creds add` stores auth data (persisted on the /config volume)."""
+    default = Path(env_str("GPMC_CACHE_DIR", "/config")) / "auth_data"
+    return Path(env_str("GPMC_AUTH_DATA_FILE", str(default)))
+
+
 @dataclass
 class Config:
     # --- Immich ---
@@ -62,6 +70,7 @@ class Config:
     gpmc_language: str = ""
     gpmc_log_level: str = ""
     gpmc_cache_dir: str = "/config"
+    gpmc_auth_data_file: str = ""
     gpmc_use_quota: bool = False
     gpmc_saver: bool = False
     gpmc_force_upload: bool = False
@@ -120,7 +129,10 @@ class Config:
                 env_str("GPMC_AUTH_DATA")
                 or env_str("GP_AUTH_DATA")
                 or env_str("GOTOHP_AUTH_STRING")
+                # written by `creds add`, so a browser login needs no env var
+                or read_auth_data_file(auth_data_file_path())
             ),
+            gpmc_auth_data_file=str(auth_data_file_path()),
             gpmc_threads=env_int("GPMC_THREADS", env_int("GOTOHP_THREADS", 3)),
             gpmc_timeout=env_int("GPMC_TIMEOUT", 60),
             gpmc_proxy=env_str("GPMC_PROXY"),
@@ -231,7 +243,10 @@ class Config:
         if not self.immich_api_key:
             issues.append("IMMICH_API_KEY is required")
         if not self.gpmc_configured and not self.dry_run:
-            issues.append("GPMC_AUTH_DATA is required (or run with --dry-run)")
+            issues.append(
+                "GPMC_AUTH_DATA is required: run `creds add <oauth_token>`, set "
+                "the variable, or use --dry-run"
+            )
         if self.album_backend not in ALBUM_BACKENDS:
             issues.append(f"ALBUM_BACKEND must be one of {ALBUM_BACKENDS}")
         if self.metadata_backend not in METADATA_BACKENDS:

@@ -52,18 +52,57 @@ docker compose logs -f
 ### Google アカウントの認証（Auth Data）
 
 gpmc は Google フォト Android アプリの auth data（旧 gotohp の Auth String と同じ文字列）を使います。
+`Email=` と `Token=aas_et/...` を含む長いクエリ文字列が auth data であり、
+**`oauth2_4/...` の `oauth_token` クッキーそのものは auth data ではありません**。
 
-- **`GPMC_AUTH_DATA` に入れるだけ** — サイドカーがその値を gpmc に直接渡します（`creds add` のような登録手順は不要）。
-- gpmc 自身の変数名 `GP_AUTH_DATA` でも構いません（旧 `GOTOHP_AUTH_STRING` は後方互換。[gotohp からの移行](#gotohp-からの移行) 参照）。
-- 生の gpmc CLI にも同じ値が渡るので、単体での動作確認もできます。
+#### 方法 A: ブラウザのログインから作る（推奨）
+
+gotohp と同じ交換処理をサイドカーに移植してあります。Android 端末も root も
+パケットキャプチャも不要です。
+
+1. ブラウザのシークレットウィンドウで <https://accounts.google.com/EmbeddedSetup> を開き、対象アカウントでログイン
+2. DevTools → Application / Storage → Cookies → `https://accounts.google.com` → `oauth_token` の値をコピー
+3. サイドカーに渡す（`-` は標準入力から読むので、シェル履歴に残りません）
+
+```bash
+# 対話的に貼り付ける
+docker compose run --rm immich-gphotos-sidecar creds add -
+
+# 変数経由で渡す（read -rs で入力すれば履歴にも残りません）
+read -rs OAUTH_TOKEN
+printf '%s' "$OAUTH_TOKEN" | docker compose run --rm -T immich-gphotos-sidecar creds add -
+```
+
+サイドカーは Play サービスの「アカウント追加」リクエストを再現して `oauth_token` を
+マスタートークン（`aas_et/...`）に交換し、Google フォト用の auth data を組み立て、
+gpmc で疎通確認したうえで `GPMC_AUTH_DATA_FILE`（既定 `/config/auth_data`、パーミッション 0600）に
+保存します。`GPMC_AUTH_DATA` が空ならこのファイルが自動的に使われるので、`sidecar.env` の
+編集は不要です（保存先の `/config` を永続化しておいてください）。
+
+| コマンド | 用途 |
+| --- | --- |
+| `creds add <oauth_token>` / `creds add -` | oauth_token を auth data に交換して保存 |
+| `creds add - --no-save` | 保存せず auth data を表示（`GPMC_AUTH_DATA` に貼る用） |
+| `creds show` | どの auth data / アカウントが使われるか（トークンは伏字） |
+| `creds test` | 現在の auth data で Google フォトに接続できるか確認 |
+
+> `oauth_token` は短命かつ 1 回限りです。`BadAuthentication` になったら取り直してください。
+> 交換後のマスタートークンはアカウント全体を操作できる強い資格情報なので、
+> `/config/auth_data` や `sidecar.env` は `chmod 600` などで保護してください。
+
+#### 方法 B: すでに auth data を持っている場合
+
+`GPMC_AUTH_DATA` に貼るだけです（gpmc 自身の変数名 `GP_AUTH_DATA`、旧 `GOTOHP_AUTH_STRING` も
+後方互換で読みます。[gotohp からの移行](#gotohp-からの移行) 参照）。
+Android アプリのトラフィックから取得する手順は gpmc の README にあります。
+生の gpmc CLI にも同じ値が渡るので、単体での動作確認もできます。
 
 ```bash
 docker compose run --rm immich-gphotos-sidecar doctor       # 認証と gpmc の確認
+docker compose run --rm immich-gphotos-sidecar creds show   # 使用中の auth data（伏字）
 docker compose run --rm immich-gphotos-sidecar gpmc --help  # 生の gpmc CLI
 ```
 
-auth data は gpmc の README にある手順（Android の Google フォトアプリのトラフィックから
-mobile API 用の auth data、あるいは Embedded Setup の `oauth_token` クッキー）で取得します。
 `GPMC_CACHE_DIR`（既定 `/config`）に gpmc のハッシュキャッシュ（`~/.gpmc`）が残るので、
 コンテナを作り直しても再アップロードは発生しません。
 
@@ -78,7 +117,7 @@ mobile API 用の auth data、あるいは Embedded Setup の `oauth_token` ク�
 | `GOTOHP_AUTH_STRING` | `GPMC_AUTH_DATA`（`GP_AUTH_DATA` も可。旧名も後方互換で読みます） |
 | `GOTOHP_THREADS` | `GPMC_THREADS`（旧名も後方互換で読みます） |
 | `ALBUM_BACKEND=gotohp` | `ALBUM_BACKEND=gpmc`（旧値は自動的に `gpmc` と解釈します） |
-| `GOTOHP_BIN` / `GOTOHP_CONFIG` / `GOTOHP_ACCOUNT` / `GOTOHP_EXTRA_ARGS` / `GOTOHP_USE_PTY` / `GOTOHP_NO_TUI` / `GOTOHP_TIMEOUT` | 廃止（バイナリの配置も `creds add` も不要） |
+| `GOTOHP_BIN` / `GOTOHP_CONFIG` / `GOTOHP_ACCOUNT` / `GOTOHP_EXTRA_ARGS` / `GOTOHP_USE_PTY` / `GOTOHP_NO_TUI` / `GOTOHP_TIMEOUT` | 廃止（バイナリ配置は不要。gotohp の `creds add` はサイドカー内蔵の `creds add` に置き換え） |
 | gotohp の設定/キャッシュ | `/config` 配下の `~/.gpmc`（`GPMC_CACHE_DIR`） |
 
 - 状態 DB（`/state/sidecar-state.sqlite3`）はそのまま使えます。アップロード済み判定は MediaKey ベースのままです。
@@ -182,6 +221,9 @@ docker compose run --rm immich-gphotos-sidecar run --full-scan        # 透か�
 docker compose run --rm immich-gphotos-sidecar run --dry-run          # アップロードせずサイドカーだけ生成
 docker compose run --rm immich-gphotos-sidecar run --max-assets 50    # 件数制限
 docker compose run --rm immich-gphotos-sidecar stats     # 状態 DB の統計
+docker compose run --rm immich-gphotos-sidecar creds add -           # oauth_token → auth data（標準入力から）
+docker compose run --rm immich-gphotos-sidecar creds show            # 使用中の auth data（トークンは伏字）
+docker compose run --rm immich-gphotos-sidecar creds test            # 認証だけを確認
 docker compose run --rm immich-gphotos-sidecar gpmc /work/foo --recursive --threads 3   # 生の gpmc CLI
 ```
 
@@ -211,6 +253,7 @@ Immich と同居させている場合は各コマンドの前に `-f docker-comp
 | --- | --- | --- |
 | `IMMICH_BASE_URL` / `IMMICH_API_KEY` | – | **必須**。Immich の URL と API キー |
 | `GPMC_AUTH_DATA` | – | **必須**。Google フォトアプリの auth data（`GP_AUTH_DATA` / 旧 `GOTOHP_AUTH_STRING` も可） |
+| `GPMC_AUTH_DATA_FILE` | `<GPMC_CACHE_DIR>/auth_data` | `creds add` が書き出す auth data ファイル（`GPMC_AUTH_DATA` が空のとき使用。モード 0600） |
 | `GPMC_THREADS` | `3` | gpmc の並列アップロード数 |
 | `GPMC_TIMEOUT` | `60` | gpmc の 1 リクエストあたりのタイムアウト（秒） |
 | `GPMC_CACHE_DIR` | `/config` | gpmc のハッシュキャッシュ（`~/.gpmc`）の置き場所 |
@@ -280,7 +323,8 @@ Immich と同居させている場合は各コマンドの前に `-f docker-comp
 
 ```bash
 python3 -m venv /tmp/venv && /tmp/venv/bin/pip install -r requirements.txt
-bash tests/run_e2e.sh        # 3 回連続実行し、サイドカー・状態 DB・アルバム・冪等性を検証
+bash tests/run_e2e.sh        # 単体テスト + 3 回連続実行で、サイドカー・状態 DB・アルバム・冪等性を検証
+python3 tests/test_google_auth.py   # oauth_token → auth data の変換だけを単体で検証（ネットワーク不要）
 ```
 
 `run_e2e.sh` は既定で `/tmp/venv/bin/python` を使います。システムの Python で動かすときは
@@ -291,7 +335,8 @@ bash tests/run_e2e.sh        # 3 回連続実行し、サイドカー・状態 D
 
 | 症状 | 対処 |
 | --- | --- |
-| `doctor` の `gpmc_credentials` が NG | `GPMC_AUTH_DATA` を再取得して設定（auth data の失効が有力）。`/config` が永続化されているか確認 |
+| `doctor` の `gpmc_credentials` が NG | `creds add -` で auth data を作り直す（失効が有力）。`/config` が永続化されているか確認 |
+| `No email value in auth_data` | `GPMC_AUTH_DATA` に `oauth2_4/...` のクッキーをそのまま入れています。`creds add -` で auth data に交換してください |
 | `exiftool` が NG | `METADATA_BACKEND=none` にするか、`docker compose pull` でイメージを取り直す（`libimage-exiftool-perl` 入り） |
 | `docker compose pull` が `denied` / `unauthorized` | GHCR パッケージが private。`read:packages` の PAT で `docker login ghcr.io` するか、パッケージを public にする |
 | Immich 同居時に設定が反映されない | `sidecar.env` が compose ファイルと同じディレクトリにあるか、`-f docker-compose.yml -f docker-compose.immich.yml` を付けているか確認 |

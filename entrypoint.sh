@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Entry point: prepares volumes/config, then dispatches to the sidecar CLI.
 #   daemon (default) | run | doctor | stats | version
+#   creds add <oauth_token|-> | creds show | creds test   -> Google credentials
 #   gpmc <args...>    -> raw gpmc CLI (e.g. `gpmc /work/foo --recursive`)
 #   anything else     -> executed verbatim (sh, bash, python, ...)
 set -euo pipefail
@@ -24,6 +25,14 @@ if [ -z "${GP_AUTH_DATA:-}" ] && [ -n "${GOTOHP_AUTH_STRING:-}" ]; then
   export GP_AUTH_DATA="$GOTOHP_AUTH_STRING"
 fi
 
+# `creds add` stores the auth data on the /config volume; let the raw gpmc CLI
+# read it too (the sidecar itself picks it up through GPMC_AUTH_DATA_FILE).
+AUTH_DATA_FILE="${GPMC_AUTH_DATA_FILE:-$GPMC_CACHE_DIR/auth_data}"
+if [ -z "${GP_AUTH_DATA:-}" ] && [ -f "$AUTH_DATA_FILE" ]; then
+  GP_AUTH_DATA="$(grep -v -e '^[[:space:]]*#' -e '^[[:space:]]*$' "$AUTH_DATA_FILE" | head -n 1 || true)"
+  [ -n "$GP_AUTH_DATA" ] && export GP_AUTH_DATA || unset GP_AUTH_DATA
+fi
+
 if [ -n "${TZ:-}" ] && [ -f "/usr/share/zoneinfo/${TZ}" ]; then
   ln -snf "/usr/share/zoneinfo/${TZ}" /etc/localtime 2>/dev/null || true
   echo "${TZ}" > /etc/timezone 2>/dev/null || true
@@ -37,7 +46,7 @@ case "$cmd" in
     shift
     exec gpmc "$@"
     ;;
-  run|daemon|doctor|stats|version|--help|-h|--*)
+  run|daemon|doctor|stats|creds|version|--help|-h|--*)
     exec python -m app.main "$@"
     ;;
   *)
