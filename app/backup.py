@@ -10,6 +10,10 @@ Phase B (upload)   stage hardlinks per Immich album and run `gotohp upload -a
                    album backfill works for already-uploaded assets.
 Phase C (finish)   optional Library API metadata pass, library snapshot,
                    manifest, watermark advance and run report.
+
+Phases A and B are interleaved in cycles of UPLOAD_BATCH_SIZE assets so a large
+first run uploads as it goes instead of downloading the whole library first.
+That keeps the work cache bounded, prints progress and stays resumable.
 """
 
 from __future__ import annotations
@@ -44,6 +48,7 @@ log = get_logger("backup")
 
 MAX_ATTEMPTS = 5
 RETRY_BUDGET = 500
+PROGRESS_EVERY = 25
 UNSORTED = "_unsorted"
 
 
@@ -99,6 +104,7 @@ class BackupRunner:
             if cfg.album_backend == "library_api":
                 self.album_syncer = LibraryAlbumSyncer(self.gphotos)
         self._uploaded_ids: Set[str] = set()
+        self._truncated = False
 
     def close(self) -> None:
         self.state.close()
@@ -125,6 +131,7 @@ class BackupRunner:
         }
         errors: List[Dict[str, str]] = []
         self._uploaded_ids.clear()
+        self._truncated = False
 
         log.info("run %s starting (dry_run=%s full_scan=%s)", run_id, cfg.dry_run, cfg.full_scan)
         self.immich.ping()
@@ -153,36 +160,78 @@ class BackupRunner:
         counters["candidates"] = len(candidates)
         log.info("scanned %s assets, %s need work", counters["scanned"], len(candidates))
 
-        prepared: List[Prepared] = []
-        for asset_id in candidates:
+        total = len(candidates)
+        cycle_size = max(1, cfg.upload_batch_size)
+        if total > cycle_size:
+            log.info("processing %s assets in cycles of %s (prepare -> upload -> cleanup)", total, cycle_size)
+        processed = 0
+        for cycle_index, cycle in enumerate(chunked(candidates, cycle_size), start=1):
             if should_stop():
-                log.warning("stop requested during prepare phase")
+                log.warning("stop requested; %s of %s assets processed", processed, total)
                 break
-            try:
-                item = self._prepare_asset(asset_id, albums, asset_albums, counters)
-            except Exception as exc:  # noqa: BLE001 - one bad asset must not kill the run
-                counters["failed"] += 1
-                errors.append({"assetId": asset_id, "stage": "prepare", "error": str(exc)[:300]})
-                log.warning("prepare failed for %s: %s", asset_id, exc)
-                self.state.bump_attempt(asset_id, f"prepare: {exc}")
-                continue
-            if item is not None:
-                prepared.append(item)
+            prepared: List[Prepared] = []
+            for asset_id in cycle:
+                if should_stop():
+                    log.warning("stop requested during prepare phase")
+                    break
+                processed += 1
+                try:
+                    item = self._prepare_asset(asset_id, albums, asset_albums, counters)
+                except Exception as exc:  # noqa: BLE001 - one bad asset must not kill the run
+                    counters["failed"] += 1
+                    errors.append({"assetId": asset_id, "stage": "prepare", "error": str(exc)[:300]})
+                    log.warning("prepare failed for %s: %s", asset_id, exc)
+                    self.state.bump_attempt(asset_id, f"prepare: {exc}")
+                    continue
+                if item is not None:
+                    prepared.append(item)
+                if processed % PROGRESS_EVERY == 0 or processed == total:
+                    log.info(
+                        "progress %s/%s assets (uploaded=%s skipped=%s downloaded=%s failed=%s)",
+                        processed,
+                        total,
+                        len(self._uploaded_ids),
+                        counters["skipped"],
+                        counters["downloaded"],
+                        counters["failed"],
+                    )
 
-        if prepared and not cfg.dry_run:
-            self._upload_phase(prepared, albums, counters, errors, should_stop)
-            self._library_api_phase(prepared, albums, counters)
-            if not cfg.keep_local_copies:
-                self._cleanup_cache(prepared)
+            if prepared and not cfg.dry_run:
+                self._upload_phase(prepared, albums, counters, errors, should_stop)
+                self._library_api_phase(prepared, albums, counters)
+                if not cfg.keep_local_copies:
+                    self._cleanup_cache(prepared)
+                log.info(
+                    "cycle %s finished at %s/%s assets (uploaded=%s album_links=%s failed=%s)",
+                    cycle_index,
+                    processed,
+                    total,
+                    len(self._uploaded_ids),
+                    counters["album_links"],
+                    counters["failed"],
+                )
 
         counters["uploaded"] = len(self._uploaded_ids)
         self._write_library_snapshot(albums, run_id)
 
         stopped = should_stop()
-        if not cfg.dry_run and not stopped and counters["failed"] == 0:
+        if (
+            not cfg.dry_run
+            and not stopped
+            and not self._truncated
+            and counters["failed"] == 0
+        ):
             new_watermark = iso(started - timedelta(minutes=cfg.watermark_skew_minutes))
             self.state.set_meta("watermark", new_watermark)
             log.info("watermark advanced to %s", new_watermark)
+        elif self._truncated:
+            log.warning(
+                "keeping previous watermark because this run was capped at %s assets; "
+                "rerun until the cap is no longer hit",
+                cfg.max_assets_per_run,
+            )
+        elif stopped:
+            log.warning("keeping previous watermark because the run was interrupted")
         elif counters["failed"]:
             log.warning("keeping previous watermark because %s assets failed", counters["failed"])
 
@@ -194,6 +243,7 @@ class BackupRunner:
             "durationSeconds": round((ended - started).total_seconds(), 1),
             "dryRun": cfg.dry_run,
             "stopped": stopped,
+            "truncated": self._truncated,
             "albumBackend": cfg.album_backend,
             "metadataBackend": cfg.metadata_backend,
             "albums": len(albums),
@@ -257,7 +307,14 @@ class BackupRunner:
                         seen.add(asset_id)
                         ordered.append(asset_id)
 
-        if cfg.max_assets_per_run > 0:
+        if cfg.max_assets_per_run > 0 and len(ordered) > cfg.max_assets_per_run:
+            self._truncated = True
+            log.warning(
+                "capping this run at %s of %s candidate assets (MAX_ASSETS_PER_RUN); "
+                "the watermark will not advance",
+                cfg.max_assets_per_run,
+                len(ordered),
+            )
             ordered = ordered[: cfg.max_assets_per_run]
         return ordered
 
@@ -594,7 +651,8 @@ def run_doctor(cfg: Config) -> Dict[str, Any]:
             add("immich", False, exc)
         try:
             albums = client.list_albums()
-            add("immich_albums", True, f"{len(albums)} album(s) visible")
+            total = sum(int(album.get("assetCount") or 0) for album in albums)
+            add("immich_albums", True, f"{len(albums)} album(s) visible, {total} member(s) reported")
         except ImmichError as exc:
             add("immich_albums", False, exc)
     else:
