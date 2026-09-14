@@ -1,0 +1,48 @@
+name: tmp-apply
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: "payload tarball url"
+        required: true
+      sha256:
+        description: "expected sha256 of the tarball"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: download and verify payload
+        env:
+          PAYLOAD_URL: ${{ inputs.url }}
+          PAYLOAD_SHA: ${{ inputs.sha256 }}
+        run: |
+          set -euo pipefail
+          curl -fsSL "$PAYLOAD_URL" -o /tmp/payload.tar.gz
+          echo "$PAYLOAD_SHA  /tmp/payload.tar.gz" | sha256sum -c -
+          tar -tzf /tmp/payload.tar.gz
+
+      - name: apply payload
+        run: |
+          set -euo pipefail
+          tar -xzf /tmp/payload.tar.gz -C .
+          python3 patch_readme.py
+          rm -f patch_readme.py
+          git status --porcelain
+
+      - name: commit
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then echo "no changes"; exit 1; fi
+          git commit -m "Use GHCR image in compose, add Immich stack overlay and docs"
+          git push
