@@ -11,13 +11,13 @@ Google フォトへバックアップするサイドカー用 Docker コンテ�
 - イメージは GitHub Actions が自動ビルドして GHCR へ push（`linux/amd64` + `linux/arm64`）
 
 ```
-  Immich REST API                この コンテナ                        Google フォト
+  Immich REST API                このコンテナ                         Google フォト
  ┌───────────────┐   assets   ┌──────────────────────────┐   gpmc   ┌──────────────┐
  │ /search/metadata ├──────────►│ 1. 差分検出 (sqlite)      │─────────►│ メディア      │
- │ /assets/{id}     │  originals│ 2. サイドカー JSON/XMP     │  -a      │ アルバム      │
+ │ /assets/{id}     │  originals│ 2. サイドカー JSON/XMP     │ album    │ アルバム      │
  │ /assets/{id}/original ───────►│ 3. EXIF/XMP 埋め込み      │─────────►│              │
  │ /albums          │  albums   │ 4. アルバム毎にステージング │          └──────────────┘
- │ /tags /people    ├──────────►│ 5. gpmc upload            │  Library API（任意）
+ │ /tags /people    ├──────────►│ 5. gpmc.Client.upload()   │  Library API（任意）
  └───────────────┘            └──────────────────────────┘─────────► description / album
 ```
 
@@ -51,10 +51,10 @@ docker compose logs -f
 
 ### Google アカウントの認証（Auth Data）
 
-gpmc は Google フォト Android アプリの auth data（gotohp の Auth String と同じ文字列）を使います。
+gpmc は Google フォト Android アプリの auth data（旧 gotohp の Auth String と同じ文字列）を使います。
 
 - **`GPMC_AUTH_DATA` に入れるだけ** — サイドカーがその値を gpmc に直接渡します（`creds add` のような登録手順は不要）。
-- gpmc 自身の変数名 `GP_AUTH_DATA`、旧 `GOTOHP_AUTH_STRING` も後方互換で読みます。
+- gpmc 自身の変数名 `GP_AUTH_DATA` でも構いません（旧 `GOTOHP_AUTH_STRING` は後方互換。[gotohp からの移行](#gotohp-からの移行) 参照）。
 - 生の gpmc CLI にも同じ値が渡るので、単体での動作確認もできます。
 
 ```bash
@@ -66,6 +66,25 @@ auth data は gpmc の README にある手順（Android の Google フォトア�
 mobile API 用の auth data、あるいは Embedded Setup の `oauth_token` クッキー）で取得します。
 `GPMC_CACHE_DIR`（既定 `/config`）に gpmc のハッシュキャッシュ（`~/.gpmc`）が残るので、
 コンテナを作り直しても再アップロードは発生しません。
+
+### gotohp からの移行
+
+アップロードは gotohp（Go の CLI バイナリ）から [gpmc](https://github.com/xob0t/gpmc)（Python ライブラリ）に
+置き換わりました。サブプロセス・pty・TUI 出力の解析は無くなり、`gpmc.Client` をサイドカーの
+プロセス内で直接呼びます。
+
+| 旧（gotohp） | 新（gpmc） |
+| --- | --- |
+| `GOTOHP_AUTH_STRING` | `GPMC_AUTH_DATA`（`GP_AUTH_DATA` も可。旧名も後方互換で読みます） |
+| `GOTOHP_THREADS` | `GPMC_THREADS`（旧名も後方互換で読みます） |
+| `ALBUM_BACKEND=gotohp` | `ALBUM_BACKEND=gpmc`（旧値は自動的に `gpmc` と解釈します） |
+| `GOTOHP_BIN` / `GOTOHP_CONFIG` / `GOTOHP_ACCOUNT` / `GOTOHP_EXTRA_ARGS` / `GOTOHP_USE_PTY` / `GOTOHP_NO_TUI` / `GOTOHP_TIMEOUT` | 廃止（バイナリの配置も `creds add` も不要） |
+| gotohp の設定/キャッシュ | `/config` 配下の `~/.gpmc`（`GPMC_CACHE_DIR`） |
+
+- 状態 DB（`/state/sidecar-state.sqlite3`）はそのまま使えます。アップロード済み判定は MediaKey ベースのままです。
+- ただし gpmc のアルバム API は「名前で既存アルバムを再利用」しないため、gotohp 時代に作られたアルバムは
+  album key を持っていません。移行後の初回実行で同名アルバムが新規作成され、以降はその key を状態 DB に
+  保存して追記します（重複が困る場合は Google フォト側で手動統合してください）。
 
 ### Google Photos Library API（任意）
 
@@ -114,8 +133,8 @@ echo '<read:packages の PAT>' | docker login ghcr.io -u <github ユーザー名
 
 | ジョブ | 内容 |
 | --- | --- |
-| `test` | `libimage-exiftool-perl` を入れて `tests/run_e2e.sh`（モック Immich + 偽 gpmc の E2E） |
-| `image` | `test` 成功後に amd64 をビルドして `version` でスモークテスト → amd64 + arm64 を GHCR へ push |
+| `test`（表示名 `e2e (mock immich + fake gpmc)`） | `libimage-exiftool-perl` を入れて `PY=python bash tests/run_e2e.sh`（モック Immich + 偽の `gpmc` パッケージの E2E） |
+| `image`（表示名 `image (amd64 + arm64)`） | `test` 成功後に amd64 をビルドし、導入された `gpmc` のバージョン・`gpmc --help`・`version` でスモークテスト → amd64 + arm64 を GHCR へ push |
 
 - Pull Request では `test` と amd64 のビルド・スモークテストだけを行い、GHCR には push しません。
 - アップローダは pip 依存（`gpmc`）なので、ビルド引数でなく `requirements.txt` の `gpmc>=0.9,<1` を書き換えて固定します。
@@ -163,7 +182,7 @@ docker compose run --rm immich-gphotos-sidecar run --full-scan        # 透か�
 docker compose run --rm immich-gphotos-sidecar run --dry-run          # アップロードせずサイドカーだけ生成
 docker compose run --rm immich-gphotos-sidecar run --max-assets 50    # 件数制限
 docker compose run --rm immich-gphotos-sidecar stats     # 状態 DB の統計
-docker compose run --rm immich-gphotos-sidecar gpmc /work/foo --recursive   # 生の gpmc CLI
+docker compose run --rm immich-gphotos-sidecar gpmc /work/foo --recursive --threads 3   # 生の gpmc CLI
 ```
 
 Immich と同居させている場合は各コマンドの前に `-f docker-compose.yml -f docker-compose.immich.yml`
@@ -198,14 +217,20 @@ Immich と同居させている場合は各コマンドの前に `-f docker-comp
 | `GPMC_FORCE_UPLOAD` / `GPMC_SKIP_EXISTING_FILENAMES` | `false` | 重複排除の挙動（強制再アップ / 同名ファイルのスキップ） |
 | `GPMC_USE_QUOTA` / `GPMC_SAVER` | `false` | 容量を消費する画質設定 |
 | `GPMC_LOG_LEVEL` | – | gpmc 自身のログレベル（未指定なら `ERROR`、`LOG_LEVEL=DEBUG` なら `DEBUG`） |
+| `GPMC_PROXY` / `GPMC_LANGUAGE` | – | gpmc のプロキシ（`protocol://user:pass@host:port`）と API の言語 |
+| `GPMC_SHOW_PROGRESS` | `false` | gpmc の進捗表示を出す（デバッグ用） |
 | `ALBUM_BACKEND` | `gpmc` | `gpmc` / `library_api` / `none`（旧 `gotohp` も `gpmc` として解釈） |
 | `ALBUM_NAME_TEMPLATE` | `{album}` | 例: `Immich / {album}` |
 | `BACKFILL_ALBUMS` | `true` | 既にアップロード済みの資産にも後からアルバムを付け直す |
+| `ALBUM_INCLUDE_SHARED` | `false` | Immich の共有アルバムも対象に含める |
 | `METADATA_BACKEND` | `embed` | `embed`（exiftool で埋め込み） / `library_api` / `both` / `none` |
 | `ASSET_TYPES` | `IMAGE,VIDEO` | 対象の種類 |
 | `INCLUDE_ARCHIVED` | `true` | Immich のアーカイブ済みも対象に含める |
 | `FULL_SCAN` | `false` | 透かしを無視して毎回全件照合 |
 | `MAX_ASSETS_PER_RUN` | `0`（無制限） | 1 回の実行で扱う上限 |
+| `UPLOAD_BATCH_SIZE` | `200` | ステージングとアップロードのバッチ件数（`/work` の使用量に直結） |
+| `KEEP_LOCAL_COPIES` | `false` | `/work` の一時コピーを実行後も残す（デバッグ用） |
+| `WATERMARK_SKEW_MINUTES` | `10` | 差分検出の透かしを巻き戻す猶予（分） |
 | `SCHEDULE_CRON` / `INTERVAL_MINUTES` | – / `1440` | cron 指定が優先。どちらも常駐モード用 |
 | `DRY_RUN` | `false` | アップロードしない（サイドカー生成のみ） |
 
