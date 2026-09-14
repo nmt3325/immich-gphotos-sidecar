@@ -25,7 +25,7 @@ Google フォトへバックアップするサイドカー用 Docker コンテ�
 
 | 種類 | 保存先 | 内容 |
 | --- | --- | --- |
-| オリジナルファイル | Google フォト | `/api/assets/{id}/original` をそのままアップロード（元ファイル名を維持） |
+| オリジナルファイル | Google フォト | マウントした Immich ライブラリから直接読み取ってアップロード（未設定なら `/api/assets/{id}/original` を HTTP 取得）。元ファイル名は維持 |
 | サイドカー情報 | `/sidecar/assets/<xx>/<assetId>.json` と `.xmp` | 元ファイル名・元パス・チェックサム・撮影日時・EXIF・GPS・説明・タグ・人物・お気に入り・アーカイブ・所属アルバム |
 | 埋め込みメタデータ | Google フォト側のファイル本体 | 撮影日時・GPS・説明・キーワード・レーティング・`XMP-dc:Identifier=immich:<assetId>`（exiftool） |
 | アルバム | Google フォト + `/sidecar/library/albums.json` | Immich のアルバム名でアルバムを作成し、対応するメディアを追加 |
@@ -241,9 +241,46 @@ Immich と同居させている場合は各コマンドの前に `-f docker-comp
 | `/sidecar` | サイドカー JSON/XMP、ライブラリスナップショット、レポート | **必須** |
 | `/config` | gpmc のハッシュキャッシュ（`~/.gpmc`、`GPMC_CACHE_DIR`） | **必須** |
 | `/work` | ダウンロードとステージングの作業領域（実行後に自動削除） | 任意（tmpfs 可） |
+| `/immich-library` | Immich のオリジナル（`UPLOAD_LOCATION`）を読み取り専用でマウント | 任意（直接読み取りする場合） |
 
 `/work` にはアップロード対象の一時コピーが置かれるため、`MAX_ASSETS_PER_RUN` と
 `UPLOAD_BATCH_SIZE` に見合った空き容量（既定なら数 GB）を確保してください。
+
+## オリジナルの取得元（HTTP か直接読み取りか）
+
+既定では Immich の `/api/assets/{id}/original` から HTTP でダウンロードします。
+サイドカーを Immich と同じホストで動かしているなら、同じファイルをネットワーク
+経由でコピーするのは無駄なので、Immich の保存先をマウントして直接読み取れます。
+
+```yaml
+  immich-gphotos-sidecar:
+    volumes:
+      - ${UPLOAD_LOCATION}:/immich-library:ro   # Immich と同じ実体
+      - ./sidecar-state:/state
+    environment:
+      - IMMICH_LIBRARY_PATH=/immich-library
+      - ASSET_SOURCE=auto   # local にすると HTTP へフォーレパックしない
+```
+
+- Immich が返す `originalPath`（例: `upload/upload/<userId>/ab/cd/<assetId>.jpg`、
+  ストレージテンプレート設定時は `upload/library/admin/2024/IMG_0001.jpg`）を
+  マウント先に対応付けます。先頭の階層は自動で読み替えるので、
+  `UPLOAD_LOCATION` をそのままマウントすれば動きます（合わない場合のみ
+  `IMMICH_LIBRARY_PATH_PREFIX` を指定）。
+- アップロード前にサイズと sha1 を Immich の値と照合します
+  （`VERIFY_LOCAL_CHECKSUM=false` で無効化）。
+- Google フォトに載るファイル名は常に Immich の元ファイル名（`originalFileName`）です。
+  Immich は既定でライブラリ上のファイルを `<assetId>.jpg` のような ID 名で保存しますが、
+  ステージング時に元の名前へ付け替えます（ハードリンクなのでコピーは発生しません）。
+- `METADATA_BACKEND=embed`（既定）では exiftool がファイルを書き換えるため、
+  `/work` にコピーしてそのコピーを編集します（元ファイルには一切書き込みません）。
+  `METADATA_BACKEND=none` ならコピーもせず、ライブラリのファイルをそのまま
+  アップロードします（`LOCAL_ALWAYS_COPY=true` で常にコピー）。
+- 対応付けできなかった資産は `ASSET_SOURCE=auto` なら HTTP に自動フォーレバックし、
+  `local` なら失敗として記録します。`doctor` の `immich_library` で対応付けを確認できます。
+- メタデータやアルバム情報の取得は従来どおり Immich API を使います（変わるのはファイル本体の取得経路だけ）。
+- マウントは読み取り専用（`:ro`）を推奨します。コンテナのユーザーが
+  読めない場合は compose の `user:` とホスト側の権限を合わせてください。
 
 ## 主な環境変数
 
@@ -252,6 +289,11 @@ Immich と同居させている場合は各コマンドの前に `-f docker-comp
 | 変数 | 既定 | 説明 |
 | --- | --- | --- |
 | `IMMICH_BASE_URL` / `IMMICH_API_KEY` | – | **必須**。Immich の URL と API キー |
+| `ASSET_SOURCE` | `auto` | `auto`（ライブラリがあれば直接読み取り） / `local`（直接読み取りのみ） / `api`（常に HTTP） |
+| `IMMICH_LIBRARY_PATH` | – | Immich の `UPLOAD_LOCATION` をマウントしたパス（複数可、カンマ区切り。`:ro` 推奨） |
+| `IMMICH_LIBRARY_PATH_PREFIX` | 自動 | `originalPath` から取り除く先頭パス（自動判定で足りないときだけ） |
+| `VERIFY_LOCAL_CHECKSUM` | `true` | ローカルファイルのサイズと sha1 を Immich の値と照合 |
+| `LOCAL_ALWAYS_COPY` | `false` | 常に `/work` にコピーしてからアップロード（既定は埋め込み時のみ） |
 | `GPMC_AUTH_DATA` | – | **必須**。Google フォトアプリの auth data（`GP_AUTH_DATA` / 旧 `GOTOHP_AUTH_STRING` も可） |
 | `GPMC_AUTH_DATA_FILE` | `<GPMC_CACHE_DIR>/auth_data` | `creds add` が書き出す auth data ファイル（`GPMC_AUTH_DATA` が空のとき使用。モード 0600） |
 | `GPMC_THREADS` | `3` | gpmc の並列アップロード数 |
@@ -289,7 +331,8 @@ Immich と同居させている場合は各コマンドの前に `-f docker-comp
    `gpmc.Client.upload()` をプロセス内で呼びます（サブプロセス・pty・TUI 解析は不要）。
    返り値の `{パス: MediaKey}` を状態 DB に保存し、アルバムへは MediaKey を別途追加します
    （初回は `add_to_album` で作成し、以降は保存した album key に `add_to_existing_album`）。
-   同名衝突は `名前_<assetId 先頭 8 桁>.ext` に退避します。
+   ステージング名は元ファイル名（`originalFileName`）に揃えるため、ライブラリ上が ID 名でも
+   Google フォトには元の名前で表示されます。同名衝突は `名前_<assetId 先頭 8 桁>.ext` に退避します。
 5. **冪等性** — 2 回目以降は「アップロード済み」「アルバム反映済み」の資産をスキップ。
    Google 側のハッシュ重複排除が働いた場合も `MediaKey` が返るため、アルバム付与は正しく行われます。
 

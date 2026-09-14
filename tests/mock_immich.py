@@ -24,7 +24,7 @@ ASSETS = {
         "id": "aaaa1111-0000-4000-8000-000000000001",
         "type": "IMAGE",
         "originalFileName": "IMG_0001.jpg",
-        "originalPath": "upload/library/admin/2024/IMG_0001.jpg",
+        "originalPath": "upload/upload/owner-1/aa/bb/aaaa1111-0000-4000-8000-000000000001.jpg",
         "originalMimeType": "image/jpeg",
         "deviceAssetId": "IMG_0001.jpg-12345",
         "deviceId": "pixel",
@@ -56,7 +56,7 @@ ASSETS = {
         "id": "aaaa1111-0000-4000-8000-000000000002",
         "type": "IMAGE",
         "originalFileName": "IMG_0002.jpg",
-        "originalPath": "upload/library/admin/2024/IMG_0002.jpg",
+        "originalPath": "upload/upload/owner-1/cc/dd/aaaa1111-0000-4000-8000-000000000002.jpg",
         "originalMimeType": "image/jpeg",
         "checksum": "c2hhMS1jaGVja3N1bS0y",
         "fileCreatedAt": "2024-06-02T02:30:00.000Z",
@@ -74,7 +74,7 @@ ASSETS = {
         "id": "aaaa1111-0000-4000-8000-000000000003",
         "type": "VIDEO",
         "originalFileName": "VID_0003.mp4",
-        "originalPath": "upload/library/admin/2024/VID_0003.mp4",
+        "originalPath": "upload/upload/owner-1/ee/ff/aaaa1111-0000-4000-8000-000000000003.mp4",
         "originalMimeType": "video/mp4",
         "checksum": "c2hhMS1jaGVja3N1bS0z",
         "fileCreatedAt": "2024-07-03T12:00:00.000Z",
@@ -90,6 +90,13 @@ ASSETS = {
         "exifInfo": {"dateTimeOriginal": "2024-07-03T12:00:00.000Z"},
     },
 }
+
+# the sidecar validates local originals against these, so advertise the real
+# checksum and size of the bytes this mock serves
+CHECKSUM = base64.b64encode(hashlib.sha1(JPEG).digest()).decode("ascii")
+for _asset in ASSETS.values():
+    _asset["checksum"] = CHECKSUM
+    _asset.setdefault("exifInfo", {})["fileSizeInByte"] = len(JPEG)
 
 ALBUMS = {
     "bbbb2222-0000-4000-8000-00000000000a": {

@@ -2,8 +2,10 @@
 
 One pass does three phases:
 
-Phase A (prepare)  enumerate changed assets, write sidecar JSON/XMP, download
-                   the originals that still need uploading and embed metadata.
+Phase A (prepare)  enumerate changed assets, write sidecar JSON/XMP, read the
+                   originals that still need uploading (straight from the
+                   mounted Immich library when it is configured, over HTTP
+                   otherwise) and embed metadata.
 Phase B (upload)   stage hardlinks per Immich album and hand every album batch
                    to the gpmc uploader, which attaches the returned media keys
                    to the album. Duplicates are deduplicated server side but
@@ -34,6 +36,7 @@ from .config import Config
 from .gpmc_uploader import GpmcUploader, UploadError
 from .gphotos import GooglePhotosClient, GPhotosError, GPhotosPermissionError
 from .immich import ImmichClient, ImmichError
+from .local_library import LocalLibrary, LocalLibraryError
 from .log import get_logger
 from .sidecar import (
     apply_file_times,
@@ -74,6 +77,9 @@ class Prepared:
     album_ids: List[str] = field(default_factory=list)
     media_key: Optional[str] = None
     local_path: Optional[Path] = None
+    # Google Photos names the upload after the file it receives, and Immich
+    # keeps library files as <assetId>.<ext>, so carry the original name along
+    upload_name: Optional[str] = None
     needs_upload: bool = False
 
 
@@ -84,6 +90,13 @@ class BackupRunner:
         self.state = State(cfg.state_path)
         self.immich = ImmichClient(
             cfg.immich_base_url, cfg.immich_api_key, cfg.immich_timeout, cfg.immich_retries
+        )
+        # originals are read from the mounted Immich library when it is
+        # configured, and pulled over HTTP otherwise
+        self.library = LocalLibrary(
+            cfg.immich_library_paths if cfg.local_library_enabled else [],
+            prefixes=cfg.library_prefixes,
+            verify_checksum=cfg.verify_local_checksum,
         )
         self.uploader = GpmcUploader(
             auth_data=cfg.gpmc_auth_data,
@@ -126,6 +139,9 @@ class BackupRunner:
             "sidecars_written": 0,
             "downloaded": 0,
             "bytes_downloaded": 0,
+            "local_reads": 0,
+            "local_direct": 0,
+            "bytes_local": 0,
             "uploaded": 0,
             "upload_calls": 0,
             "album_links": 0,
@@ -138,6 +154,16 @@ class BackupRunner:
         self._truncated = False
 
         log.info("run %s starting (dry_run=%s full_scan=%s)", run_id, cfg.dry_run, cfg.full_scan)
+        if self.library.enabled:
+            log.info(
+                "originals: reading from %s (ASSET_SOURCE=%s)",
+                ", ".join(str(root) for root in self.library.roots),
+                cfg.asset_source,
+            )
+        else:
+            log.info(
+                "originals: downloading from the immich api (ASSET_SOURCE=%s)", cfg.asset_source
+            )
         self.immich.ping()
         if not cfg.dry_run:
             accounts = self.uploader.ensure_credentials()
@@ -254,6 +280,7 @@ class BackupRunner:
             "truncated": self._truncated,
             "albumBackend": cfg.album_backend,
             "metadataBackend": cfg.metadata_backend,
+            "assetSource": cfg.asset_source,
             "albums": len(albums),
             **counters,
             "errors": errors[:25],
@@ -390,22 +417,63 @@ class BackupRunner:
 
         file_name = safe_component(asset.get("originalFileName") or f"{asset_id}.bin")
         target = cfg.cache_dir / asset_id[:2] / asset_id / file_name
-        if not target.exists() or target.stat().st_size == 0:
-            size = self.immich.download_original(asset_id, target, cfg.download_retries)
-            counters["downloaded"] += 1
-            counters["bytes_downloaded"] += size
-            if cfg.wants_embed:
-                embed_metadata(target, payload, cfg.exiftool_bin)
-        if cfg.set_file_mtime:
-            apply_file_times(target, payload)
+        upload_path = target
+        from_library = False
+        if target.exists() and target.stat().st_size > 0:
+            pass  # left over from an interrupted run, reuse it
+        else:
+            source = self._local_original(asset)
+            if source is None:
+                size = self.immich.download_original(asset_id, target, cfg.download_retries)
+                counters["downloaded"] += 1
+                counters["bytes_downloaded"] += size
+                if cfg.wants_embed:
+                    embed_metadata(target, payload, cfg.exiftool_bin)
+            elif cfg.wants_embed or cfg.local_always_copy:
+                # exiftool rewrites the file, so work on a copy in /work and
+                # never touch the original in the library
+                counters["bytes_local"] += self.library.materialize(source, target)
+                counters["local_reads"] += 1
+                if cfg.wants_embed:
+                    embed_metadata(target, payload, cfg.exiftool_bin)
+            else:
+                # nothing has to be rewritten: upload the original in place
+                upload_path = source
+                from_library = True
+                counters["local_reads"] += 1
+                counters["local_direct"] += 1
+                counters["bytes_local"] += source.stat().st_size
+        if cfg.set_file_mtime and not from_library:
+            apply_file_times(upload_path, payload)
         return Prepared(
             asset_id=asset_id,
             payload=payload,
             album_ids=album_ids,
             media_key=media_key,
-            local_path=target,
+            local_path=upload_path,
+            upload_name=file_name,
             needs_upload=needs_upload,
         )
+
+    def _local_original(self, asset: Dict[str, Any]) -> Optional[Path]:
+        """The original on disk, or None when it has to come over HTTP."""
+        cfg = self.cfg
+        if not self.library.enabled:
+            return None
+        try:
+            source = self.library.locate(asset)
+        except LocalLibraryError as exc:
+            if cfg.requires_local_library:
+                raise
+            log.warning("%s; falling back to the immich api", exc)
+            return None
+        if source is None and cfg.requires_local_library:
+            raise LocalLibraryError(
+                f"{asset.get('originalPath') or asset.get('id')} was not found under "
+                f"{', '.join(str(root) for root in self.library.roots)}: check the mount "
+                "and IMMICH_LIBRARY_PATH_PREFIX (ASSET_SOURCE=local)"
+            )
+        return source
 
     # -------------------------------------------------------------- phase B
     def _upload_phase(
@@ -452,12 +520,17 @@ class BackupRunner:
         if not item.local_path or not item.local_path.exists():
             return None
         stage_dir.mkdir(parents=True, exist_ok=True)
-        target = stage_dir / item.local_path.name
+        # Google Photos shows the name of the file it received. Immich stores
+        # library originals as <assetId>.<ext> unless a storage template is
+        # configured, so always stage under Immich's original file name.
+        name = Path(item.upload_name or item.local_path.name).name or item.local_path.name
+        stem, suffix = os.path.splitext(name)
+        target = stage_dir / name
         if target.exists():
-            target = stage_dir / (
-                f"{item.local_path.stem}_{item.asset_id[:8]}{item.local_path.suffix}"
-            )
+            target = stage_dir / f"{stem}_{item.asset_id[:8]}{suffix}"
         try:
+            # a hardlink costs nothing, and dropping the staging dir later
+            # removes only the extra link, never the original in the library
             os.link(item.local_path, target)
         except OSError:
             shutil.copy2(item.local_path, target)
@@ -616,9 +689,20 @@ class BackupRunner:
                 log.warning("description patch failed for %s: %s", name, exc)
 
     def _cleanup_cache(self, prepared: List[Prepared]) -> None:
+        """Drop work copies. Files outside the work cache are never deleted."""
+        try:
+            cache_root = self.cfg.cache_dir.resolve()
+        except OSError:
+            return
         for item in prepared:
             if not item.local_path:
                 continue
+            try:
+                inside = cache_root in item.local_path.resolve().parents
+            except OSError:
+                inside = False
+            if not inside:
+                continue  # uploaded straight from the immich library
             if self.state.media_key(item.asset_id):
                 shutil.rmtree(item.local_path.parent, ignore_errors=True)
 
@@ -685,6 +769,49 @@ def run_doctor(cfg: Config) -> Dict[str, Any]:
     else:
         add("immich", False, "IMMICH_BASE_URL / IMMICH_API_KEY missing")
 
+    library = LocalLibrary(
+        cfg.immich_library_paths if cfg.local_library_enabled else [],
+        prefixes=cfg.library_prefixes,
+        verify_checksum=cfg.verify_local_checksum,
+    )
+    if not library.enabled:
+        add(
+            "immich_library",
+            not cfg.requires_local_library,
+            "not configured: originals are downloaded over HTTP (mount the Immich "
+            "upload location and set IMMICH_LIBRARY_PATH)",
+        )
+    elif library.missing_roots():
+        add(
+            "immich_library",
+            False,
+            "not mounted: " + ", ".join(str(root) for root in library.missing_roots()),
+        )
+    else:
+        detail = "roots=" + ", ".join(str(root) for root in library.roots)
+        ok = True
+        if cfg.immich_base_url and cfg.immich_api_key:
+            sample: Optional[Dict[str, Any]] = None
+            try:
+                probe = ImmichClient(
+                    cfg.immich_base_url, cfg.immich_api_key, cfg.immich_timeout, 2
+                )
+                sample = next(iter(probe.iter_assets()), None)
+            except Exception as exc:  # noqa: BLE001 - doctor only reports
+                detail = f"{detail} (could not probe an asset: {exc})"
+            if sample:
+                original_path = str(sample.get("originalPath") or "")
+                resolved = library.resolve(original_path)
+                if resolved:
+                    detail = f"{detail} {original_path} -> {resolved}"
+                else:
+                    ok = False
+                    detail = (
+                        f"{detail} {original_path} not found: check the mount and "
+                        "IMMICH_LIBRARY_PATH_PREFIX"
+                    )
+        add("immich_library", ok, detail)
+
     uploader = GpmcUploader(
         auth_data=cfg.gpmc_auth_data,
         threads=cfg.gpmc_threads,
@@ -738,5 +865,6 @@ def run_doctor(cfg: Config) -> Dict[str, Any]:
         "ok": all(item["ok"] for item in checks),
         "albumBackend": cfg.album_backend,
         "metadataBackend": cfg.metadata_backend,
+        "assetSource": cfg.asset_source,
         "checks": checks,
     }
