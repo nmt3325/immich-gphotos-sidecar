@@ -1,11 +1,14 @@
 # immich-gphotos-sidecar
 
+[![build](https://github.com/nmt3325/immich-gphotos-sidecar/actions/workflows/build.yml/badge.svg)](https://github.com/nmt3325/immich-gphotos-sidecar/actions/workflows/build.yml)
+
 Immich の**コンテンツ（オリジナルファイル）**・**サイドカー情報（元ファイル名やメタデータ）**・**アルバム**を
 Google フォトへバックアップするサイドカー用 Docker コンテナです。
 
 - アップロードは [xob0t/gotohp](https://github.com/xob0t/gotohp) の CLI（Google フォト非公式 API）
 - アルバム作成・追加は gotohp の `-a/--album`（既定）または Google Photos Library API（任意）
 - メタデータは **EXIF/XMP への埋め込み**（既定）と **ローカルのサイドカー JSON / XMP**
+- イメージは GitHub Actions が自動ビルドして GHCR へ push（`linux/amd64` + `linux/arm64`）
 
 ```
   Immich REST API                この コンテナ                        Google フォト
@@ -42,6 +45,10 @@ docker compose up -d                      # 常駐（既定 1 日 1 回）
 docker compose logs -f
 ```
 
+`docker-compose.example.yml` は GHCR のイメージを使う単独運用向けです。既存の Immich スタックへ
+相乗りさせる場合は [Immich の docker compose に同居させる](#immich-の-docker-compose-に同居させる)
+（`.env` の衝突を避けて `sidecar.env` を使う手順）を参照してください。
+
 ### Google アカウントの認証（Auth String）
 
 gotohp は Google フォト Android アプリの Auth String を使います。取得方法は 2 通り。
@@ -63,8 +70,10 @@ Auth String は gotohp の README にある手順（Android の Google フォト
 `ALBUM_BACKEND=library_api` / `METADATA_BACKEND=library_api|both` を使う場合のみ必要です。
 
 1. Google Cloud で OAuth クライアント（デスクトップ）を作成し、Photos Library API を有効化
-2. スコープ `https://www.googleapis.com/auth/photoslibrary` でリフレッシュトークンを取得
-3. `GPHOTOS_CLIENT_ID` / `GPHOTOS_CLIENT_SECRET` / `GPHOTOS_REFRESH_TOKEN` を `.env` に設定
+2. リフレッシュトークンを取得（2025-03-31 以降に使えるスコープは `photoslibrary.appendonly` /
+   `photoslibrary.edit.appcreateddata` / `photoslibrary.readonly.appcreateddata` の 3 つだけで、
+   旧 `photoslibrary` / `photoslibrary.readonly` / `photoslibrary.sharing` は廃止済み）
+3. `GPHOTOS_CLIENT_ID` / `GPHOTOS_CLIENT_SECRET` / `GPHOTOS_REFRESH_TOKEN` を設定（単独運用なら `.env`、Immich 同居なら `sidecar.env`）
 
 > **重要な制約**: 2025-03-31 以降、Library API は「**その OAuth クライアント自身がアップロードしたメディア**」しか
 > 参照・編集できません。gotohp は非公式のモバイル API でアップロードするため、Library API からは
@@ -90,7 +99,26 @@ docker pull ghcr.io/nmt3325/immich-gphotos-sidecar:latest
 
 リポジトリが private の間は GHCR のパッケージも private なので、pull 側で
 `read:packages` 権限の PAT を使った `docker login ghcr.io` が必要です
-（Package settings で public にすれば不要）。
+（リポジトリ → Packages → Package settings → Change visibility で public にすれば不要）。
+
+```bash
+echo '<read:packages の PAT>' | docker login ghcr.io -u <github ユーザー名> --password-stdin
+```
+
+更新は `docker compose pull && docker compose up -d`。特定のビルドに固定したいときは compose の
+`image:` を `ghcr.io/nmt3325/immich-gphotos-sidecar:sha-<短縮SHA>` や `:v1.2.3` に書き換えます。
+
+ワークフローは [.github/workflows/build.yml](.github/workflows/build.yml) の 2 ジョブ構成です。
+
+| ジョブ | 内容 |
+| --- | --- |
+| `test` | `libimage-exiftool-perl` を入れて `tests/run_e2e.sh`（モック Immich + 偽 gotohp の E2E） |
+| `image` | `test` 成功後に amd64 をビルドして `version` でスモークテスト → amd64 + arm64 を GHCR へ push |
+
+- Pull Request では `test` と amd64 のビルド・スモークテストだけを行い、GHCR には push しません。
+- 手動実行では入力 `gotohp_ref` でイメージに焼き込む gotohp のリビジョンを変更できます（既定 `main`）。
+- リリースは `git tag v1.2.3 && git push origin v1.2.3`。
+- キャッシュは GitHub Actions cache（`type=gha`）。arm64 は QEMU エミュレーションなので初回は数分かかります。
 
 ## Immich の docker compose に同居させる
 
@@ -105,12 +133,21 @@ $EDITOR sidecar.env           # IMMICH_API_KEY / GOTOHP_AUTH_STRING など
 docker compose -f docker-compose.yml -f docker-compose.immich.yml up -d
 ```
 
+```
+/path/to/immich/
+├── docker-compose.yml          # Immich 公式（そのまま）
+├── docker-compose.immich.yml   # ← このリポジトリの overlay
+├── .env                        # Immich 用（そのまま）
+└── sidecar.env                 # ← サイドカー用
+```
+
 - `.env` は「compose ファイル内の `${...}` を埋める補間用」で、プロジェクトディレクトリに
   1 つだけ自動で読まれます。`env_file:` は「コンテナへ渡す環境変数」で任意のファイル名を
   指定でき、補間には使われません。だから `sidecar.env` は Immich の `.env` と衝突しません。
-- Immich の `.env` への追記は非推奨です。`immich-server` は `env_file: .env` を読むので、
-  `GOTOHP_AUTH_STRING` などの秘密が Immich のコンテナにも渡ってしまいます。
+- Immich の `.env` への追記は非推奨です。`immich-server` と `immich-machine-learning` は
+  `env_file: .env` を読むので、`GOTOHP_AUTH_STRING` などの秘密が Immich のコンテナにも渡ってしまいます。
 - Immich の `.env` の値を使いたいときだけ `environment:` 側で `${TZ:-Asia/Tokyo}` のように参照します。
+- overlay の `IMMICH_BASE_URL` は既定で `http://immich-server:2283`（同じ compose ネットワーク内）です。
 
 `include:` / `COMPOSE_FILE` / 別プロジェクト + external network などの選択肢は
 [docs/immich-compose.md](docs/immich-compose.md) にまとめています。
@@ -126,6 +163,9 @@ docker compose run --rm immich-gphotos-sidecar run --max-assets 50    # 件数�
 docker compose run --rm immich-gphotos-sidecar stats     # 状態 DB の統計
 docker compose run --rm immich-gphotos-sidecar gotohp upload /work/foo -r   # 生の gotohp
 ```
+
+Immich と同居させている場合は各コマンドの前に `-f docker-compose.yml -f docker-compose.immich.yml`
+（または `COMPOSE_FILE` の設定）を付けてください。
 
 `run` は JSON のレポートを標準出力に出し、`/sidecar/reports/*.json` にも保存します。
 終了コードは `0`=成功 / `1`=一部失敗 / `2`=設定不備。
@@ -144,7 +184,7 @@ docker compose run --rm immich-gphotos-sidecar gotohp upload /work/foo -r   # �
 
 ## 主な環境変数
 
-完全な一覧と既定値は [.env.example](.env.example) を参照。
+完全な一覧と既定値は [.env.example](.env.example) を参照（Immich 同居時は同じ内容を `sidecar.env` に置きます）。
 
 | 変数 | 既定 | 説明 |
 | --- | --- | --- |
@@ -213,12 +253,18 @@ python3 -m venv /tmp/venv && /tmp/venv/bin/pip install -r requirements.txt
 bash tests/run_e2e.sh        # 3 回連続実行し、サイドカー・状態 DB・アルバム・冪等性を検証
 ```
 
+`run_e2e.sh` は既定で `/tmp/venv/bin/python` を使います。システムの Python で動かすときは
+`PY=python3 bash tests/run_e2e.sh` のように `PY` を渡してください（CI も同じ方法です）。
+`exiftool` があるとメタデータ埋め込みまで検証されます。
+
 ## トラブルシューティング
 
 | 症状 | 対処 |
 | --- | --- |
 | `doctor` の `gotohp_credentials` が NG | `GOTOHP_AUTH_STRING` を設定するか `gotohp creds add` を実行。`/config` が永続化されているか確認 |
-| `exiftool` が NG | `METADATA_BACKEND=none` にするか、イメージを再ビルド（`libimage-exiftool-perl` が入ります） |
+| `exiftool` が NG | `METADATA_BACKEND=none` にするか、`docker compose pull` でイメージを取り直す（`libimage-exiftool-perl` 入り） |
+| `docker compose pull` が `denied` / `unauthorized` | GHCR パッケージが private。`read:packages` の PAT で `docker login ghcr.io` するか、パッケージを public にする |
+| Immich 同居時に設定が反映されない | `sidecar.env` が compose ファイルと同じディレクトリにあるか、`-f docker-compose.yml -f docker-compose.immich.yml` を付けているか確認 |
 | アップロードが進まない/出力が壊れる | 古い gotohp なら `GOTOHP_NO_TUI=false` と `GOTOHP_USE_PTY=true` を試す |
 | Library API が 403 | 上記の 2025-03-31 制約。`ALBUM_BACKEND=gotohp` / `METADATA_BACKEND=embed` に戻す |
 | `/work` が膨らむ | `MAX_ASSETS_PER_RUN` と `UPLOAD_BATCH_SIZE` を下げる。`KEEP_LOCAL_COPIES=false` を維持 |
