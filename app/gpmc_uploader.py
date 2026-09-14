@@ -126,7 +126,7 @@ class GpmcUploader:
         except ValueError as exc:
             raise UploadError(
                 f"google photos credentials are missing or malformed: {exc} "
-                "(set GPMC_AUTH_DATA)"
+                "(set GPMC_AUTH_DATA or run `creds add <oauth_token>`)"
             ) from exc
         except Exception as exc:  # noqa: BLE001 - surface as a clean error
             raise UploadError(f"could not initialise gpmc: {exc}") from exc
