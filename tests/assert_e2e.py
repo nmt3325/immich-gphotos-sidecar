@@ -35,12 +35,13 @@ if len(reports) >= 1:
     check("run1 wrote 3 sidecars", first["sidecars_written"] == 3, str(first["sidecars_written"]))
     check("run1 downloaded 3 originals", first["downloaded"] == 3, str(first["downloaded"]))
     check("run1 had no failures", first["failed"] == 0, json.dumps(first["errors"])[:300])
-    check("run1 used 3 gotohp calls (2 albums + unsorted=0)", first["upload_calls"] == 2, str(first["upload_calls"]))
+    check("run1 used 2 upload calls (2 albums + unsorted=0)", first["upload_calls"] == 2, str(first["upload_calls"]))
+    check("run1 reports the gpmc album backend", first["albumBackend"] == "gpmc", str(first["albumBackend"]))
 
 if len(reports) >= 2:
     second = reports[1]
     check("run2 is a no-op (nothing uploaded)", second["uploaded"] == 0, str(second["uploaded"]))
-    check("run2 made no gotohp calls", second["upload_calls"] == 0, str(second["upload_calls"]))
+    check("run2 made no upload calls", second["upload_calls"] == 0, str(second["upload_calls"]))
     check("run2 wrote no new sidecars", second["sidecars_written"] == 0, str(second["sidecars_written"]))
     check("run2 planned no work", second["planned"] == 0, str(second["planned"]))
     check("run2 downloaded nothing again", second["downloaded"] == 0, str(second["downloaded"]))
@@ -53,7 +54,7 @@ if len(reports) >= 2:
 
 if len(reports) >= 3:
     third = reports[2]
-    check("run3 (pty + album backfill) restored 3 links", third["album_links"] == 3, str(third["album_links"]))
+    check("run3 (album backfill) restored 3 links", third["album_links"] == 3, str(third["album_links"]))
     check("run3 had no failures", third["failed"] == 0, json.dumps(third["errors"])[:300])
 
 assets = [dict(row) for row in conn.execute("SELECT * FROM assets ORDER BY asset_id").fetchall()]
@@ -131,30 +132,54 @@ check("3 run reports written", len(list(reports_dir.glob("*.json"))) == 3)
 
 # ---- fake google photos side ----
 store = json.loads(STORE.read_text(encoding="utf-8"))
+calls = store["calls"]
+upload_calls = [call for call in calls if call.get("call") == "upload"]
+create_album_calls = [call for call in calls if call.get("call") == "add_to_album"]
+existing_album_calls = [call for call in calls if call.get("call") == "add_to_existing_album"]
+
 check("google side has 3 media items", len(store["media"]) == 3, str(len(store["media"])))
 check(
     "google albums created with immich names",
-    set(store["albums"]) == {"2024 \u65c5\u884c", "Trains"},
-    str(sorted(store["albums"])),
+    set(store["album_names"].values()) == {"2024 \u65c5\u884c", "Trains"},
+    str(sorted(store["album_names"].values())),
+)
+check(
+    "exactly 2 google albums exist (no duplicates on re-runs)",
+    len(store["albums"]) == 2,
+    str(list(store["album_names"].values())),
 )
 check(
     "google album membership 2 + 1",
     sorted(len(v) for v in store["albums"].values()) == [1, 2],
-    str({k: len(v) for k, v in store["albums"].items()}),
+    str({store["album_names"].get(k, k): len(v) for k, v in store["albums"].items()}),
 )
-upload_calls = [call for call in store["calls"] if call and call[0] == "upload"]
 check(
-    "uploads always passed -a for album batches",
-    all("-a" in call for call in upload_calls),
+    "albums created once, then appended to by media key",
+    len(create_album_calls) == 2 and len(existing_album_calls) >= 2,
+    f"create={len(create_album_calls)} append={len(existing_album_calls)}",
+)
+check(
+    "no append call hit an unknown album",
+    all("error" not in call for call in existing_album_calls),
+    str([call for call in existing_album_calls if "error" in call])[:200],
+)
+check(
+    "uploads never mixed album handling into gpmc.upload()",
+    all(call["albumName"] is None and call["albumId"] is None for call in upload_calls),
     str(len(upload_calls)) + " upload calls",
 )
 check(
     "uploads used the configured thread count",
-    all("-t" in call and call[call.index("-t") + 1] == "2" for call in upload_calls),
+    all(call["threads"] == 2 for call in upload_calls),
+    str([call["threads"] for call in upload_calls]),
 )
 check(
-    "uploads passed the config path",
-    all("-c" in call for call in upload_calls),
+    "uploads recursed into the staging directory",
+    all(call["recursive"] for call in upload_calls),
+)
+check(
+    "uploads relied on server side dedup (no force upload)",
+    all(not call["forceUpload"] for call in upload_calls),
 )
 
 print()

@@ -14,9 +14,6 @@ services:
     # 自前でビルドしたい場合は上の image を消して build を有効化する
     # build:
     #   context: .
-    #   args:
-    #     # pin gotohp if you want reproducible images, e.g. GOTOHP_REF: v0.10.0
-    #     GOTOHP_REF: main
     container_name: immich-gphotos-sidecar
     restart: unless-stopped
     env_file:
@@ -26,7 +23,7 @@ services:
     volumes:
       - ./data/state:/state       # sqlite sync state (must persist)
       - ./data/sidecar:/sidecar   # sidecar JSON/XMP + album/library snapshots
-      - ./data/config:/config     # gotohp credentials (must persist)
+      - ./data/config:/config     # gpmc hash cache + credentials (must persist)
       - sidecar-work:/work        # scratch: downloads + staging (can be tmpfs)
     # Run as your own user if you want the sidecar files owned by you:
     # user: "1000:1000"

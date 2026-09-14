@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import os
-import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List
 
 _TRUE = {"1", "true", "yes", "y", "on"}
 
-ALBUM_BACKENDS = ("gotohp", "library_api", "none")
+ALBUM_BACKENDS = ("gpmc", "library_api", "none")
+# `gotohp` was the name of the previous uploader; keep old configs working.
+ALBUM_BACKEND_ALIASES = {"gotohp": "gpmc"}
 METADATA_BACKENDS = ("embed", "library_api", "both", "none")
 
 
@@ -53,20 +54,22 @@ class Config:
     immich_timeout: int = 60
     immich_retries: int = 4
 
-    # --- gotohp ---
-    gotohp_bin: str = "/usr/local/bin/gotohp-cli"
-    gotohp_config: str = "/config/gotohp.config"
-    gotohp_auth_string: str = ""
-    gotohp_account: str = ""
-    gotohp_threads: int = 3
-    gotohp_extra_args: List[str] = field(default_factory=list)
-    gotohp_use_pty: bool = False
-    gotohp_no_tui: bool = True
-    gotohp_timeout: int = 7200
-    gotohp_disable_filter: bool = False
+    # --- gpmc (Google Photos mobile API uploader) ---
+    gpmc_auth_data: str = ""
+    gpmc_threads: int = 3
+    gpmc_timeout: int = 60
+    gpmc_proxy: str = ""
+    gpmc_language: str = ""
+    gpmc_log_level: str = ""
+    gpmc_cache_dir: str = "/config"
+    gpmc_use_quota: bool = False
+    gpmc_saver: bool = False
+    gpmc_force_upload: bool = False
+    gpmc_skip_existing_filenames: bool = False
+    gpmc_show_progress: bool = False
 
     # --- Google side behaviour ---
-    album_backend: str = "gotohp"
+    album_backend: str = "gpmc"
     album_name_template: str = "{album}"
     album_include_shared: bool = False
     backfill_albums: bool = True
@@ -112,17 +115,24 @@ class Config:
             immich_api_key=env_str("IMMICH_API_KEY"),
             immich_timeout=env_int("IMMICH_TIMEOUT", 60),
             immich_retries=env_int("IMMICH_RETRIES", 4),
-            gotohp_bin=env_str("GOTOHP_BIN", "/usr/local/bin/gotohp-cli"),
-            gotohp_config=env_str("GOTOHP_CONFIG", "/config/gotohp.config"),
-            gotohp_auth_string=env_str("GOTOHP_AUTH_STRING"),
-            gotohp_account=env_str("GOTOHP_ACCOUNT"),
-            gotohp_threads=env_int("GOTOHP_THREADS", 3),
-            gotohp_extra_args=shlex.split(env_str("GOTOHP_EXTRA_ARGS")),
-            gotohp_use_pty=env_bool("GOTOHP_USE_PTY", False),
-            gotohp_no_tui=env_bool("GOTOHP_NO_TUI", True),
-            gotohp_timeout=env_int("GOTOHP_TIMEOUT", 7200),
-            gotohp_disable_filter=env_bool("GOTOHP_DISABLE_FILTER", False),
-            album_backend=env_str("ALBUM_BACKEND", "gotohp").lower(),
+            # GP_AUTH_DATA is gpmc's own variable, GOTOHP_AUTH_STRING the legacy one
+            gpmc_auth_data=(
+                env_str("GPMC_AUTH_DATA")
+                or env_str("GP_AUTH_DATA")
+                or env_str("GOTOHP_AUTH_STRING")
+            ),
+            gpmc_threads=env_int("GPMC_THREADS", env_int("GOTOHP_THREADS", 3)),
+            gpmc_timeout=env_int("GPMC_TIMEOUT", 60),
+            gpmc_proxy=env_str("GPMC_PROXY"),
+            gpmc_language=env_str("GPMC_LANGUAGE"),
+            gpmc_log_level=env_str("GPMC_LOG_LEVEL").upper(),
+            gpmc_cache_dir=env_str("GPMC_CACHE_DIR", "/config"),
+            gpmc_use_quota=env_bool("GPMC_USE_QUOTA", False),
+            gpmc_saver=env_bool("GPMC_SAVER", False),
+            gpmc_force_upload=env_bool("GPMC_FORCE_UPLOAD", False),
+            gpmc_skip_existing_filenames=env_bool("GPMC_SKIP_EXISTING_FILENAMES", False),
+            gpmc_show_progress=env_bool("GPMC_SHOW_PROGRESS", False),
+            album_backend=normalize_album_backend(env_str("ALBUM_BACKEND", "gpmc")),
             album_name_template=env_str("ALBUM_NAME_TEMPLATE", "{album}"),
             album_include_shared=env_bool("ALBUM_INCLUDE_SHARED", False),
             backfill_albums=env_bool("BACKFILL_ALBUMS", True),
@@ -191,6 +201,17 @@ class Config:
     def gphotos_configured(self) -> bool:
         return bool(self.gphotos_client_id and self.gphotos_client_secret and self.gphotos_refresh_token)
 
+    @property
+    def gpmc_configured(self) -> bool:
+        return bool(self.gpmc_auth_data)
+
+    @property
+    def gpmc_effective_log_level(self) -> str:
+        """Log level handed to gpmc (its INFO level is very chatty)."""
+        if self.gpmc_log_level:
+            return self.gpmc_log_level
+        return "DEBUG" if self.log_level == "DEBUG" else "ERROR"
+
     def ensure_dirs(self) -> None:
         for path in (
             Path(self.state_dir),
@@ -199,7 +220,7 @@ class Config:
             self.reports_dir,
             self.cache_dir,
             self.stage_dir,
-            Path(self.gotohp_config).parent,
+            Path(self.gpmc_cache_dir),
         ):
             path.mkdir(parents=True, exist_ok=True)
 
@@ -209,6 +230,8 @@ class Config:
             issues.append("IMMICH_BASE_URL is required")
         if not self.immich_api_key:
             issues.append("IMMICH_API_KEY is required")
+        if not self.gpmc_configured and not self.dry_run:
+            issues.append("GPMC_AUTH_DATA is required (or run with --dry-run)")
         if self.album_backend not in ALBUM_BACKENDS:
             issues.append(f"ALBUM_BACKEND must be one of {ALBUM_BACKENDS}")
         if self.metadata_backend not in METADATA_BACKENDS:
@@ -222,4 +245,11 @@ class Config:
             )
         if self.page_size < 1 or self.page_size > 1000:
             issues.append("PAGE_SIZE must be between 1 and 1000")
+        if self.gpmc_threads < 1:
+            issues.append("GPMC_THREADS must be 1 or more")
         return issues
+
+
+def normalize_album_backend(value: str) -> str:
+    backend = (value or "").strip().lower()
+    return ALBUM_BACKEND_ALIASES.get(backend, backend)

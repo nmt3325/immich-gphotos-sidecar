@@ -307,7 +307,7 @@ def embed_metadata(
 
 
 def apply_file_times(file_path: Path, payload: Dict[str, Any]) -> None:
-    """gotohp falls back to the file mtime for the media date, so align it."""
+    """gpmc uses the file mtime as the media timestamp, so align it."""
     captured = capture_datetime(payload)
     if not captured:
         return

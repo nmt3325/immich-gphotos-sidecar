@@ -152,7 +152,7 @@ def _add_common_args(parser: argparse.ArgumentParser, *, suppress: bool = False)
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="immich-gphotos-sidecar",
-        description="Back up Immich content, sidecar metadata and albums to Google Photos via gotohp.",
+        description="Back up Immich content, sidecar metadata and albums to Google Photos via gpmc.",
     )
     _add_common_args(parser)
     common = argparse.ArgumentParser(add_help=False)

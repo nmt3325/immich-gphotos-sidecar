@@ -4,15 +4,15 @@ IMPORTANT SCOPE LIMITATION
 --------------------------
 Since 2025-03-31 the official Library API can only read or modify media items
 and albums that were created by *the same OAuth client*. Assets uploaded through
-gotohp use Google's internal mobile API, so they are invisible to this API and
+gpmc use Google's internal mobile API, so they are invisible to this API and
 their MediaKey is not a Library API `mediaItem.id`.
 
 Therefore:
-* ALBUM_BACKEND=gotohp / METADATA_BACKEND=embed (the defaults) do all album and
-  metadata work through gotohp + embedded EXIF/XMP, and always work.
+* ALBUM_BACKEND=gpmc / METADATA_BACKEND=embed (the defaults) do all album and
+  metadata work through gpmc + embedded EXIF/XMP, and always work.
 * The library_api backends here are useful when the container itself also
   uploads through this API, or for managing albums that this client created.
-  They cannot retro-fit metadata onto gotohp uploads.
+  They cannot retro-fit metadata onto gpmc uploads.
 """
 
 from __future__ import annotations
@@ -105,7 +105,7 @@ class GooglePhotosClient:
                     raise GPhotosPermissionError(
                         "Google Photos API returned 403. Since 2025-03-31 the Library API "
                         "can only touch media/albums created by this OAuth client, so items "
-                        f"uploaded by gotohp cannot be edited here. Detail: {response.text[:200]}"
+                        f"uploaded by gpmc cannot be edited here. Detail: {response.text[:200]}"
                     )
                 elif response.status_code in RETRY_STATUS:
                     last_error = GPhotosError(f"{method} {path} -> HTTP {response.status_code}")
