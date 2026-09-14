@@ -44,6 +44,8 @@ jobs:
           pip install -r requirements.txt
 
       - name: run end-to-end tests
+        env:
+          PY: python
         run: bash tests/run_e2e.sh
 
   image:
