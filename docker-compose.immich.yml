@@ -2,7 +2,7 @@
 # Immich の docker-compose.yml / .env と同じフォルダに置いて使う。
 #
 #   cp .env.example sidecar.env   # ← Immich の .env とは別名にするのが肝
-#   $EDITOR sidecar.env           # IMMICH_API_KEY / GOTOHP_AUTH_STRING など
+#   $EDITOR sidecar.env           # IMMICH_API_KEY / GPMC_AUTH_DATA など
 #   docker compose -f docker-compose.yml -f docker-compose.immich.yml pull
 #   docker compose -f docker-compose.yml -f docker-compose.immich.yml run --rm immich-gphotos-sidecar doctor
 #   docker compose -f docker-compose.yml -f docker-compose.immich.yml up -d
@@ -29,7 +29,7 @@ services:
     volumes:
       - ./sidecar/state:/state     # sqlite sync state (must persist)
       - ./sidecar/sidecar:/sidecar # sidecar JSON/XMP + reports (must persist)
-      - ./sidecar/config:/config   # gotohp credentials (must persist)
+      - ./sidecar/config:/config   # gpmc hash cache + credentials (must persist)
       - sidecar-work:/work         # scratch: downloads + staging
     # user: "1000:1000"
     healthcheck:

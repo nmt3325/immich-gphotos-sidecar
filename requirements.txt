@@ -1,2 +1,4 @@
 requests>=2.31,<3
 croniter>=2.0,<7
+# Google Photos uploader (mobile API): https://github.com/xob0t/gpmc
+gpmc>=0.9,<1

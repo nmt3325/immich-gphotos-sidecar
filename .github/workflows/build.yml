@@ -8,11 +8,6 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
-    inputs:
-      gotohp_ref:
-        description: "イメージに焼き込む gotohp の git ref"
-        required: false
-        default: "main"
 
 concurrency:
   group: build-${{ github.ref }}
@@ -24,7 +19,7 @@ env:
 
 jobs:
   test:
-    name: e2e (mock immich + fake gotohp)
+    name: e2e (mock immich + fake gpmc)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -85,14 +80,14 @@ jobs:
           load: true
           push: false
           tags: immich-gphotos-sidecar:smoke
-          build-args: |
-            GOTOHP_REF=${{ github.event.inputs.gotohp_ref || 'main' }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
       - name: smoke test the image
         run: |
-          docker run --rm --entrypoint /usr/local/bin/gotohp-cli immich-gphotos-sidecar:smoke version
+          docker run --rm --entrypoint python immich-gphotos-sidecar:smoke \
+            -c "import importlib.metadata as m; print('gpmc', m.version('gpmc'))"
+          docker run --rm --entrypoint gpmc immich-gphotos-sidecar:smoke --help > /dev/null
           docker run --rm immich-gphotos-sidecar:smoke version
 
       - name: log in to ghcr.io
@@ -112,8 +107,6 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            GOTOHP_REF=${{ github.event.inputs.gotohp_ref || 'main' }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 

@@ -1,13 +1,14 @@
-"""Backup orchestration: Immich -> sidecar files -> gotohp -> Google Photos.
+"""Backup orchestration: Immich -> sidecar files -> gpmc -> Google Photos.
 
 One pass does three phases:
 
 Phase A (prepare)  enumerate changed assets, write sidecar JSON/XMP, download
                    the originals that still need uploading and embed metadata.
-Phase B (upload)   stage hardlinks per Immich album and run `gotohp upload -a
-                   "<album>"` once per album batch. Duplicates are deduplicated
-                   server side but still get added to the album, which is how
-                   album backfill works for already-uploaded assets.
+Phase B (upload)   stage hardlinks per Immich album and hand every album batch
+                   to the gpmc uploader, which attaches the returned media keys
+                   to the album. Duplicates are deduplicated server side but
+                   still return their media key, which is how album backfill
+                   works for already-uploaded assets.
 Phase C (finish)   optional Library API metadata pass, library snapshot,
                    manifest, watermark advance and run report.
 
@@ -30,7 +31,7 @@ from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Set
 
 from .albums import AlbumInfo, LibraryAlbumSyncer, load_album_index
 from .config import Config
-from .gotohp import GotohpClient, GotohpError
+from .gpmc_uploader import GpmcUploader, UploadError
 from .gphotos import GooglePhotosClient, GPhotosError, GPhotosPermissionError
 from .immich import ImmichClient, ImmichError
 from .log import get_logger
@@ -84,16 +85,19 @@ class BackupRunner:
         self.immich = ImmichClient(
             cfg.immich_base_url, cfg.immich_api_key, cfg.immich_timeout, cfg.immich_retries
         )
-        self.gotohp = GotohpClient(
-            binary=cfg.gotohp_bin,
-            config_path=cfg.gotohp_config,
-            threads=cfg.gotohp_threads,
-            extra_args=cfg.gotohp_extra_args,
-            use_pty=cfg.gotohp_use_pty,
-            timeout=cfg.gotohp_timeout,
-            disable_filter=cfg.gotohp_disable_filter,
-            log_level="debug" if cfg.log_level == "DEBUG" else "error",
-            no_tui=cfg.gotohp_no_tui,
+        self.uploader = GpmcUploader(
+            auth_data=cfg.gpmc_auth_data,
+            threads=cfg.gpmc_threads,
+            timeout=cfg.gpmc_timeout,
+            proxy=cfg.gpmc_proxy,
+            language=cfg.gpmc_language,
+            log_level=cfg.gpmc_effective_log_level,
+            use_quota=cfg.gpmc_use_quota,
+            saver=cfg.gpmc_saver,
+            force_upload=cfg.gpmc_force_upload,
+            skip_existing_filenames=cfg.gpmc_skip_existing_filenames,
+            show_progress=cfg.gpmc_show_progress,
+            cache_dir=cfg.gpmc_cache_dir,
         )
         self.gphotos: Optional[GooglePhotosClient] = None
         self.album_syncer: Optional[LibraryAlbumSyncer] = None
@@ -136,8 +140,12 @@ class BackupRunner:
         log.info("run %s starting (dry_run=%s full_scan=%s)", run_id, cfg.dry_run, cfg.full_scan)
         self.immich.ping()
         if not cfg.dry_run:
-            accounts = self.gotohp.ensure_credentials(cfg.gotohp_auth_string, cfg.gotohp_account)
-            log.info("gotohp accounts available: %s", ", ".join(accounts) or "-")
+            accounts = self.uploader.ensure_credentials()
+            log.info(
+                "google photos account: %s (gpmc %s)",
+                ", ".join(accounts) or "-",
+                self.uploader.version(),
+            )
 
         albums: Dict[str, AlbumInfo] = {}
         asset_albums: Dict[str, List[str]] = {}
@@ -361,7 +369,7 @@ class BackupRunner:
             aid for aid in album_ids if not self.state.has_album_link(aid, asset_id)
         ]
         needs_upload = media_key is None
-        needs_album = bool(missing_links) and cfg.album_backend == "gotohp" and (
+        needs_album = bool(missing_links) and cfg.album_backend == "gpmc" and (
             cfg.backfill_albums or needs_upload
         )
         if not needs_upload and not needs_album and not (
@@ -413,7 +421,7 @@ class BackupRunner:
         unsorted: List[Prepared] = []
         for item in prepared:
             targets: List[str] = []
-            if cfg.album_backend == "gotohp":
+            if cfg.album_backend == "gpmc":
                 targets = [
                     aid
                     for aid in item.album_ids
@@ -477,16 +485,26 @@ class BackupRunner:
             if not mapping:
                 return
             counters["upload_calls"] += 1
+            # Append to the Google album an earlier run created instead of letting
+            # gpmc create a second album with the same name.
+            album_key = None
+            if album_id:
+                album_key = (self.state.album(album_id) or {}).get("gp_album_key") or None
             try:
-                outcome = self.gotohp.upload_path(stage, album=album_name)
-            except GotohpError as exc:
+                outcome = self.uploader.upload_path(
+                    stage,
+                    album=None if album_key else album_name,
+                    album_id=album_key,
+                )
+            except UploadError as exc:
                 counters["failed"] += len(mapping)
                 errors.append({"stage": "upload", "album": album_name or "", "error": str(exc)[:400]})
-                log.error("gotohp upload failed: %s", exc)
+                log.error("gpmc upload failed: %s", exc)
                 for asset_id in mapping.values():
                     self.state.bump_attempt(asset_id, f"upload: {exc}")
                 return
 
+            album_ok = album_id is None or not outcome.album_error
             now = iso(utcnow())
             for path, media_key in outcome.media_keys.items():
                 asset_id = self._resolve_asset(path, mapping)
@@ -501,7 +519,7 @@ class BackupRunner:
                     last_error=None,
                 )
                 self._uploaded_ids.add(asset_id)
-                if album_id:
+                if album_id and album_ok:
                     self.state.add_album_link(album_id, asset_id, media_key, now)
                     counters["album_links"] += 1
             for path, error in outcome.errors.items():
@@ -512,19 +530,28 @@ class BackupRunner:
                 )
                 if asset_id:
                     self.state.bump_attempt(asset_id, str(error))
-            if album_id:
-                self.state.upsert_album(
-                    album_id,
-                    gp_album_key=(outcome.album_keys[0] if outcome.album_keys else None),
-                    synced_at=now,
+            if outcome.album_error:
+                counters["failed"] += 1
+                errors.append(
+                    {
+                        "stage": "album",
+                        "album": album_name or "",
+                        "error": str(outcome.album_error)[:400],
+                    }
                 )
+            if album_id:
+                album_fields: Dict[str, Any] = {"synced_at": now}
+                if outcome.album_keys:
+                    album_fields["gp_album_key"] = outcome.album_keys[0]
+                self.state.upsert_album(album_id, **album_fields)
             log.info(
-                "gotohp: total=%s ok=%s failed=%s album=%r added=%s",
+                "gpmc: total=%s ok=%s failed=%s album=%r added=%s existing_album=%s",
                 outcome.total,
                 outcome.succeeded,
                 outcome.failed,
-                outcome.album_name,
+                album_name,
                 outcome.items_added,
+                bool(album_key),
             )
         finally:
             shutil.rmtree(stage, ignore_errors=True)
@@ -658,23 +685,24 @@ def run_doctor(cfg: Config) -> Dict[str, Any]:
     else:
         add("immich", False, "IMMICH_BASE_URL / IMMICH_API_KEY missing")
 
-    gotohp = GotohpClient(
-        binary=cfg.gotohp_bin,
-        config_path=cfg.gotohp_config,
-        threads=cfg.gotohp_threads,
-        use_pty=cfg.gotohp_use_pty,
-        timeout=120,
-        no_tui=cfg.gotohp_no_tui,
+    uploader = GpmcUploader(
+        auth_data=cfg.gpmc_auth_data,
+        threads=cfg.gpmc_threads,
+        timeout=min(cfg.gpmc_timeout, 120),
+        proxy=cfg.gpmc_proxy,
+        language=cfg.gpmc_language,
+        log_level=cfg.gpmc_effective_log_level,
+        cache_dir=cfg.gpmc_cache_dir,
     )
     try:
-        add("gotohp_binary", True, gotohp.version().splitlines()[-1] if gotohp.version() else "ok")
-    except GotohpError as exc:
-        add("gotohp_binary", False, exc)
+        add("gpmc_library", True, f"gpmc {uploader.version()}")
+    except UploadError as exc:
+        add("gpmc_library", False, exc)
     try:
-        accounts = gotohp.ensure_credentials(cfg.gotohp_auth_string, cfg.gotohp_account)
-        add("gotohp_credentials", True, ", ".join(accounts))
-    except GotohpError as exc:
-        add("gotohp_credentials", False, exc)
+        accounts = uploader.ensure_credentials()
+        add("gpmc_credentials", True, ", ".join(accounts) or "authenticated")
+    except UploadError as exc:
+        add("gpmc_credentials", False, exc)
 
     if cfg.wants_embed:
         try:

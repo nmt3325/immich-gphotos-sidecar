@@ -43,7 +43,7 @@ Compose の環境変数には役割の違う入口が 3 つある。ここを分
 ### Immich の `.env` に追記するのは避ける
 
 - Immich の `immich-server` / `immich-machine-learning` は `env_file: .env` を読むので、
-  `GOTOHP_AUTH_STRING` や `IMMICH_API_KEY` が Immich のコンテナにも渡ってしまう。
+  `GPMC_AUTH_DATA` や `IMMICH_API_KEY` が Immich のコンテナにも渡ってしまう。
 - `TZ` のような同名キーの取り合いになる。
 - Immich 公式の `example.env` を追従更新するときに差分が汚れる。
 
@@ -58,14 +58,14 @@ Compose の環境変数には役割の違う入口が 3 つある。ここを分
 └── sidecar/                    # サイドカーの永続データ
     ├── state/                  #   sqlite（必須）
     ├── sidecar/                #   サイドカー JSON/XMP・レポート（必須）
-    └── config/                 #   gotohp の認証情報（必須）
+    └── config/                 #   gpmc のキャッシュと認証情報（必須）
 ```
 
 ```bash
 cd /opt/immich
 cp <this-repo>/docker-compose.immich.yml .
 cp <this-repo>/.env.example sidecar.env
-$EDITOR sidecar.env    # IMMICH_API_KEY / GOTOHP_AUTH_STRING / スケジュールなど
+$EDITOR sidecar.env    # IMMICH_API_KEY / GPMC_AUTH_DATA / スケジュールなど
 # IMMICH_BASE_URL は docker-compose.immich.yml 側で http://immich-server:2283 に固定済み
 
 docker compose -f docker-compose.yml -f docker-compose.immich.yml pull
