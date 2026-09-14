@@ -50,6 +50,7 @@ def load_album_index(
     """Return (albums_by_id, asset_id -> [album_id])."""
     albums: Dict[str, AlbumInfo] = {}
     asset_albums: Dict[str, List[str]] = {}
+    reported_total = 0
     for summary in immich.list_albums():
         album_id = summary.get("id")
         if not album_id:
@@ -61,6 +62,21 @@ def load_album_index(
         detail = immich.get_album(album_id)
         asset_ids = [asset.get("id") for asset in (detail.get("assets") or []) if asset.get("id")]
         name = detail.get("albumName") or summary.get("albumName") or album_id
+        try:
+            reported = int(summary.get("assetCount") or detail.get("assetCount") or 0)
+        except (TypeError, ValueError):
+            reported = 0
+        reported_total += reported
+        if reported and not asset_ids:
+            log.warning(
+                "album %r reports %s member(s) but the album detail returned no assets "
+                "(response keys: %s)",
+                name,
+                reported,
+                ", ".join(sorted(str(key) for key in detail.keys())[:15]) or "-",
+            )
+        elif not reported and not asset_ids:
+            log.debug("album %r is empty in immich", name)
         info = AlbumInfo(
             album_id=album_id,
             name=name,
@@ -72,7 +88,18 @@ def load_album_index(
         albums[album_id] = info
         for asset_id in asset_ids:
             asset_albums.setdefault(asset_id, []).append(album_id)
-    log.info("indexed %s albums covering %s assets", len(albums), len(asset_albums))
+    log.info(
+        "indexed %s albums covering %s assets (immich reports %s member(s))",
+        len(albums),
+        len(asset_albums),
+        reported_total,
+    )
+    if reported_total and not asset_albums:
+        log.warning(
+            "no album membership could be read from immich even though it reports %s member(s); "
+            "album backup will be skipped this run",
+            reported_total,
+        )
     return albums, asset_albums
 
 
