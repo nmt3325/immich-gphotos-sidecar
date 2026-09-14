@@ -105,7 +105,11 @@ for path in json_files:
     payloads[data["originalFileName"]] = data
 
 first_asset = payloads.get("IMG_0001.jpg", {})
-check("sidecar keeps original path", first_asset.get("originalPath", "").endswith("IMG_0001.jpg"))
+check(
+    "sidecar keeps original path",
+    first_asset.get("originalPath", "").endswith("aaaa1111-0000-4000-8000-000000000001.jpg"),
+    str(first_asset.get("originalPath")),
+)
 check("sidecar keeps checksum", bool(first_asset.get("checksum")))
 check("sidecar keeps tags", first_asset.get("tags") == ["travel", "spring"], str(first_asset.get("tags")))
 check("sidecar keeps people", first_asset.get("people") == ["Kaichi"], str(first_asset.get("people")))
@@ -138,6 +142,18 @@ create_album_calls = [call for call in calls if call.get("call") == "add_to_albu
 existing_album_calls = [call for call in calls if call.get("call") == "add_to_existing_album"]
 
 check("google side has 3 media items", len(store["media"]) == 3, str(len(store["media"])))
+ORIGINAL_NAMES = ["IMG_0001.jpg", "IMG_0002.jpg", "VID_0003.mp4"]
+check(
+    "google photos got the original file names (not immich's <assetId>.ext)",
+    sorted(item["name"] for item in store["media"].values()) == ORIGINAL_NAMES,
+    str(sorted(item["name"] for item in store["media"].values())),
+)
+staged_names = sorted({name for call in upload_calls for name in call["files"]})
+check(
+    "every staged file was named after the original",
+    staged_names == ORIGINAL_NAMES,
+    str(staged_names),
+)
 check(
     "google albums created with immich names",
     set(store["album_names"].values()) == {"2024 \u65c5\u884c", "Trains"},

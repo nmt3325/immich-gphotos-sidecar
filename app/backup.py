@@ -77,6 +77,9 @@ class Prepared:
     album_ids: List[str] = field(default_factory=list)
     media_key: Optional[str] = None
     local_path: Optional[Path] = None
+    # Google Photos names the upload after the file it receives, and Immich
+    # keeps library files as <assetId>.<ext>, so carry the original name along
+    upload_name: Optional[str] = None
     needs_upload: bool = False
 
 
@@ -448,6 +451,7 @@ class BackupRunner:
             album_ids=album_ids,
             media_key=media_key,
             local_path=upload_path,
+            upload_name=file_name,
             needs_upload=needs_upload,
         )
 
@@ -516,11 +520,14 @@ class BackupRunner:
         if not item.local_path or not item.local_path.exists():
             return None
         stage_dir.mkdir(parents=True, exist_ok=True)
-        target = stage_dir / item.local_path.name
+        # Google Photos shows the name of the file it received. Immich stores
+        # library originals as <assetId>.<ext> unless a storage template is
+        # configured, so always stage under Immich's original file name.
+        name = Path(item.upload_name or item.local_path.name).name or item.local_path.name
+        stem, suffix = os.path.splitext(name)
+        target = stage_dir / name
         if target.exists():
-            target = stage_dir / (
-                f"{item.local_path.stem}_{item.asset_id[:8]}{item.local_path.suffix}"
-            )
+            target = stage_dir / f"{stem}_{item.asset_id[:8]}{suffix}"
         try:
             # a hardlink costs nothing, and dropping the staging dir later
             # removes only the extra link, never the original in the library

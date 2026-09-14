@@ -29,9 +29,12 @@ log = get_logger("library")
 ASSET_SOURCES = ("auto", "local", "api")
 READ_CHUNK = 1024 * 1024
 # Immich stores `originalPath` relative to /usr/src/app (e.g.
-# "upload/library/admin/2024/IMG_0001.jpg"), and older versions store it
-# absolute. Either way the leading components map onto whatever
-# UPLOAD_LOCATION is mounted as over here, so they are stripped.
+# "upload/upload/<userId>/ab/cd/<assetId>.jpg", or
+# "upload/library/admin/2024/IMG_0001.jpg" when a storage template is set),
+# and older versions store it absolute. Either way the leading components map
+# onto whatever UPLOAD_LOCATION is mounted as over here, so they are stripped.
+# The file on disk is usually named after the asset id, so the name to upload
+# with comes from `originalFileName` and never from the path.
 DEFAULT_PATH_PREFIXES: Sequence[str] = ("/usr/src/app/upload", "/usr/src/app")
 
 

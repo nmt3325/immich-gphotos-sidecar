@@ -82,7 +82,7 @@ export WORK_DIR="$BASE/work-local"
 export FAKE_GPMC_STORE="$BASE/fake-gpmc-local.json"
 mkdir -p "$STATE_DIR" "$SIDECAR_DIR" "$WORK_DIR"
 "$PY" -m app.main run --full-scan 2>&1 | tail -30
-"$PY" tests/assert_local_e2e.py "$STATE_DIR" "$LIB" "$SNAP" 0
+"$PY" tests/assert_local_e2e.py "$STATE_DIR" "$LIB" "$SNAP" 0 "$FAKE_GPMC_STORE"
 
 echo '############ run 5: local library, zero copy (METADATA_BACKEND=none) ############'
 export METADATA_BACKEND=none
@@ -92,7 +92,7 @@ export WORK_DIR="$BASE/work-direct"
 export FAKE_GPMC_STORE="$BASE/fake-gpmc-direct.json"
 mkdir -p "$STATE_DIR" "$SIDECAR_DIR" "$WORK_DIR"
 "$PY" -m app.main run --full-scan 2>&1 | tail -30
-"$PY" tests/assert_local_e2e.py "$STATE_DIR" "$LIB" "$SNAP" 3
+"$PY" tests/assert_local_e2e.py "$STATE_DIR" "$LIB" "$SNAP" 3 "$FAKE_GPMC_STORE"
 
 echo '############ doctor (local library) ############'
 "$PY" -m app.main doctor 2>&1 | tail -45 || true

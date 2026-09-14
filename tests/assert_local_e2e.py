@@ -1,6 +1,6 @@
 """Assertions for the local-library end-to-end phase.
 
-Usage: assert_local_e2e.py <state dir> <library root> <sha256 snapshot> [expected direct uploads]
+Usage: assert_local_e2e.py <state dir> <library root> <sha256 snapshot> [expected direct uploads] [gpmc store]
 """
 
 from __future__ import annotations
@@ -15,6 +15,8 @@ STATE = Path(sys.argv[1])
 LIBRARY = Path(sys.argv[2])
 SNAPSHOT = Path(sys.argv[3])
 EXPECTED_DIRECT = int(sys.argv[4]) if len(sys.argv) > 4 else 0
+STORE = Path(sys.argv[5]) if len(sys.argv) > 5 else None
+ORIGINAL_NAMES = ["IMG_0001.jpg", "IMG_0002.jpg", "VID_0003.mp4"]
 
 failures: list[str] = []
 
@@ -69,6 +71,21 @@ check(
     not [name for name in current if name.endswith((".part", ".tmp", "_original"))],
     str([name for name in current if name.endswith((".part", ".tmp", "_original"))])[:200],
 )
+
+# ---- google photos must see the original names, not immich's <assetId>.ext ----
+if STORE is not None:
+    store = json.loads(STORE.read_text(encoding="utf-8"))
+    names = sorted(item["name"] for item in store.get("media", {}).values())
+    check("uploads keep the original file names", names == ORIGINAL_NAMES, str(names))
+    staged = sorted(
+        {
+            name
+            for call in store.get("calls", [])
+            if call.get("call") == "upload"
+            for name in call.get("files", [])
+        }
+    )
+    check("every staged file was named after the original", staged == ORIGINAL_NAMES, str(staged))
 
 print()
 if failures:

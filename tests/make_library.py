@@ -1,7 +1,9 @@
 """Materialise a fake Immich upload location from the mock server's data.
 
-The mock reports paths like `upload/library/admin/2024/IMG_0001.jpg`, which is
-how Immich stores them relative to /usr/src/app. A real deployment mounts
+The mock reports paths like `upload/upload/owner-1/aa/bb/<assetId>.jpg`, which
+is how Immich stores them relative to /usr/src/app: with the default storage
+template the file on disk is named after the asset id, not after the original
+file name. A real deployment mounts
 UPLOAD_LOCATION (the directory the leading `upload/` component refers to), so
 the first component is stripped by default.
 """

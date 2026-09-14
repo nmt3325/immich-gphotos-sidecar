@@ -262,12 +262,16 @@ Immich と同居させている場合は各コマンドの前に `-f docker-comp
       - ASSET_SOURCE=auto   # local にすると HTTP へフォーレパックしない
 ```
 
-- Immich が返す `originalPath`（例: `upload/library/admin/2024/IMG_0001.jpg`）を
+- Immich が返す `originalPath`（例: `upload/upload/<userId>/ab/cd/<assetId>.jpg`、
+  ストレージテンプレート設定時は `upload/library/admin/2024/IMG_0001.jpg`）を
   マウント先に対応付けます。先頭の階層は自動で読み替えるので、
   `UPLOAD_LOCATION` をそのままマウントすれば動きます（合わない場合のみ
   `IMMICH_LIBRARY_PATH_PREFIX` を指定）。
 - アップロード前にサイズと sha1 を Immich の値と照合します
   （`VERIFY_LOCAL_CHECKSUM=false` で無効化）。
+- Google フォトに載るファイル名は常に Immich の元ファイル名（`originalFileName`）です。
+  Immich は既定でライブラリ上のファイルを `<assetId>.jpg` のような ID 名で保存しますが、
+  ステージング時に元の名前へ付け替えます（ハードリンクなのでコピーは発生しません）。
 - `METADATA_BACKEND=embed`（既定）では exiftool がファイルを書き換えるため、
   `/work` にコピーしてそのコピーを編集します（元ファイルには一切書き込みません）。
   `METADATA_BACKEND=none` ならコピーもせず、ライブラリのファイルをそのまま
@@ -327,7 +331,8 @@ Immich と同居させている場合は各コマンドの前に `-f docker-comp
    `gpmc.Client.upload()` をプロセス内で呼びます（サブプロセス・pty・TUI 解析は不要）。
    返り値の `{パス: MediaKey}` を状態 DB に保存し、アルバムへは MediaKey を別途追加します
    （初回は `add_to_album` で作成し、以降は保存した album key に `add_to_existing_album`）。
-   同名衝突は `名前_<assetId 先頭 8 桁>.ext` に退避します。
+   ステージング名は元ファイル名（`originalFileName`）に揃えるため、ライブラリ上が ID 名でも
+   Google フォトには元の名前で表示されます。同名衝突は `名前_<assetId 先頭 8 桁>.ext` に退避します。
 5. **冪等性** — 2 回目以降は「アップロード済み」「アルバム反映済み」の資産をスキップ。
    Google 側のハッシュ重複排除が働いた場合も `MediaKey` が返るため、アルバム付与は正しく行われます。
 
