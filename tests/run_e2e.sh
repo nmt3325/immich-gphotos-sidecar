@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Offline end-to-end test: mock Immich + fake gpmc, three consecutive runs.
+# Offline end-to-end test: mock Immich + fake gpmc. Three runs download the
+# originals over HTTP, two more read them straight from a fake local library.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT="$PWD"
@@ -43,6 +44,7 @@ export LOG_LEVEL=INFO
 
 echo '############ unit tests ############'
 "$PY" tests/test_google_auth.py 2>&1 | tail -25
+"$PY" tests/test_local_library.py 2>&1 | tail -25
 
 echo '############ run 1: full scan ############'
 "$PY" -m app.main run --full-scan 2>&1 | tail -30
@@ -67,3 +69,30 @@ echo '############ doctor ############'
 
 echo '############ assertions ############'
 "$PY" tests/assert_e2e.py "$STATE_DIR" "$SIDECAR_DIR" "$FAKE_GPMC_STORE"
+
+echo '############ run 4: local library (embed -> copy into /work) ############'
+LIB="$BASE/library"
+SNAP="$BASE/library.sha256.json"
+"$PY" tests/make_library.py "$LIB" "$SNAP"
+export IMMICH_LIBRARY_PATH="$LIB"
+export ASSET_SOURCE=local
+export STATE_DIR="$BASE/state-local"
+export SIDECAR_DIR="$BASE/sidecar-local"
+export WORK_DIR="$BASE/work-local"
+export FAKE_GPMC_STORE="$BASE/fake-gpmc-local.json"
+mkdir -p "$STATE_DIR" "$SIDECAR_DIR" "$WORK_DIR"
+"$PY" -m app.main run --full-scan 2>&1 | tail -30
+"$PY" tests/assert_local_e2e.py "$STATE_DIR" "$LIB" "$SNAP" 0
+
+echo '############ run 5: local library, zero copy (METADATA_BACKEND=none) ############'
+export METADATA_BACKEND=none
+export STATE_DIR="$BASE/state-direct"
+export SIDECAR_DIR="$BASE/sidecar-direct"
+export WORK_DIR="$BASE/work-direct"
+export FAKE_GPMC_STORE="$BASE/fake-gpmc-direct.json"
+mkdir -p "$STATE_DIR" "$SIDECAR_DIR" "$WORK_DIR"
+"$PY" -m app.main run --full-scan 2>&1 | tail -30
+"$PY" tests/assert_local_e2e.py "$STATE_DIR" "$LIB" "$SNAP" 3
+
+echo '############ doctor (local library) ############'
+"$PY" -m app.main doctor 2>&1 | tail -45 || true

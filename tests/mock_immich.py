@@ -91,6 +91,13 @@ ASSETS = {
     },
 }
 
+# the sidecar validates local originals against these, so advertise the real
+# checksum and size of the bytes this mock serves
+CHECKSUM = base64.b64encode(hashlib.sha1(JPEG).digest()).decode("ascii")
+for _asset in ASSETS.values():
+    _asset["checksum"] = CHECKSUM
+    _asset.setdefault("exifInfo", {})["fileSizeInByte"] = len(JPEG)
+
 ALBUMS = {
     "bbbb2222-0000-4000-8000-00000000000a": {
         "id": "bbbb2222-0000-4000-8000-00000000000a",

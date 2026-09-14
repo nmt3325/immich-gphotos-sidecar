@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import List
 
 from .google_auth import read_auth_data_file
+from .local_library import ASSET_SOURCES
 
 _TRUE = {"1", "true", "yes", "y", "on"}
 
@@ -61,6 +62,13 @@ class Config:
     immich_api_key: str = ""
     immich_timeout: int = 60
     immich_retries: int = 4
+
+    # --- originals: mounted library vs. HTTP download ---
+    asset_source: str = "auto"
+    immich_library_paths: List[str] = field(default_factory=list)
+    immich_library_prefixes: List[str] = field(default_factory=list)
+    verify_local_checksum: bool = True
+    local_always_copy: bool = False
 
     # --- gpmc (Google Photos mobile API uploader) ---
     gpmc_auth_data: str = ""
@@ -124,6 +132,14 @@ class Config:
             immich_api_key=env_str("IMMICH_API_KEY"),
             immich_timeout=env_int("IMMICH_TIMEOUT", 60),
             immich_retries=env_int("IMMICH_RETRIES", 4),
+            asset_source=env_str("ASSET_SOURCE", "auto").lower(),
+            # mount Immich's UPLOAD_LOCATION here to skip the HTTP download
+            immich_library_paths=env_list(
+                "IMMICH_LIBRARY_PATH", env_list("IMMICH_MEDIA_LOCATION", [])
+            ),
+            immich_library_prefixes=env_list("IMMICH_LIBRARY_PATH_PREFIX", []),
+            verify_local_checksum=env_bool("VERIFY_LOCAL_CHECKSUM", True),
+            local_always_copy=env_bool("LOCAL_ALWAYS_COPY", False),
             # GP_AUTH_DATA is gpmc's own variable, GOTOHP_AUTH_STRING the legacy one
             gpmc_auth_data=(
                 env_str("GPMC_AUTH_DATA")
@@ -218,6 +234,21 @@ class Config:
         return bool(self.gpmc_auth_data)
 
     @property
+    def local_library_enabled(self) -> bool:
+        """Originals are read from disk instead of the Immich HTTP API."""
+        return self.asset_source in ("auto", "local") and bool(self.immich_library_paths)
+
+    @property
+    def requires_local_library(self) -> bool:
+        """ASSET_SOURCE=local: fail instead of silently downloading."""
+        return self.asset_source == "local"
+
+    @property
+    def library_prefixes(self):
+        """Explicit originalPath prefixes, or None to use the defaults."""
+        return self.immich_library_prefixes or None
+
+    @property
     def gpmc_effective_log_level(self) -> str:
         """Log level handed to gpmc (its INFO level is very chatty)."""
         if self.gpmc_log_level:
@@ -251,6 +282,13 @@ class Config:
             issues.append(f"ALBUM_BACKEND must be one of {ALBUM_BACKENDS}")
         if self.metadata_backend not in METADATA_BACKENDS:
             issues.append(f"METADATA_BACKEND must be one of {METADATA_BACKENDS}")
+        if self.asset_source not in ASSET_SOURCES:
+            issues.append(f"ASSET_SOURCE must be one of {ASSET_SOURCES}")
+        if self.requires_local_library and not self.immich_library_paths:
+            issues.append(
+                "ASSET_SOURCE=local needs IMMICH_LIBRARY_PATH: mount the Immich "
+                "upload location into this container"
+            )
         if "{album}" not in self.album_name_template:
             issues.append("ALBUM_NAME_TEMPLATE must contain the {album} placeholder")
         if self.wants_library_api and not self.gphotos_configured:
