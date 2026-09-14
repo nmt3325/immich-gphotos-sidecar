@@ -41,6 +41,9 @@ export METADATA_BACKEND=embed
 export UPLOAD_BATCH_SIZE=200
 export LOG_LEVEL=INFO
 
+echo '############ unit tests ############'
+"$PY" tests/test_google_auth.py 2>&1 | tail -25
+
 echo '############ run 1: full scan ############'
 "$PY" -m app.main run --full-scan 2>&1 | tail -30
 
